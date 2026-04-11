@@ -1,0 +1,18 @@
+# Generated data — run generate_inputs locally to recreate
+SyntheticData/inputs/
+
+# Reference outputs — run run_reference locally to recreate
+SequentialData/
+
+# Compiled binaries
+*.o
+*.out
+generate_inputs
+run_reference
+
+# SLURM logs
+*.err
+logs/
+
+# Nsight outputs
+nsight_outputs/
