@@ -32,7 +32,7 @@ __device__ Element combine(Element left, Element right) {
 }
 ```
 
-## block_scan — The Interface You Must Implement
+## block_scan — COMMON INTERFACE BETWEEN ALL THREE FILES
 
 Each teammate must define a struct with a static `block_scan` method matching this signature:
 
