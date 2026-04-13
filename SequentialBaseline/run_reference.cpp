@@ -42,6 +42,7 @@ static bool save_output(const char* path, const float* out, size_t n) {
     return true;
 }
 
+// running sequential scan x[t] = a[t] * x[t-1] + b[t], or x_t = Ā * x_{t-1} + B̄ * u_t in matrix form
 static void sequential_scan(
     const float* a, const float* b, float* out,
     int B, int L, int D)
