@@ -76,7 +76,7 @@ struct WarpShuffle {
         // Step 1: load element (identity for out-of-range threads)
         Element val = (tid < n) ? shared_data[tid] : identity();
 
-        // Step 2: warp-level inclusive scan via shuffle ---
+        // Step 2: warp-level inclusive scan via shuffle
         val = warp_inclusive_scan(val);
 
         // Step 3: last active lane in each warp saves its total
