@@ -5,7 +5,7 @@ Inputs are not committed to the repo. Generate them locally:
 ```bash
 cd SyntheticData
 g++ -O2 -std=c++17 -o generate_inputs generate_inputs.cpp
-./generate_inputs inputs/
+./generate_inputs
 ```
 This writes 32 binary files (`input_B1_L*_D*.bin`) sweeping all (L, D) combinations. Each file contains `[a | b]` concatenated — transition scalars `a` uniform in [0.5, 0.99] and input projections `b` ~ N(0,1). The `a` range keeps chains numerically stable at L=131072.
 
