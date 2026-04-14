@@ -8,10 +8,29 @@
 #define BLOCK_SIZE 256
 
 struct Element {
-    float A[D][D];
+    float a[D];
     float b[D];
 };
 
+__device__ inline Element identity() {
+    Element e;
+    for (int d = 0; d < D; d++) {
+        e.a[d] = 1.0f;   // diagonal of identity matrix = 1
+        e.b[d] = 0.0f;
+    }
+    return e;
+}
+
+__device__ inline Element combine(Element left, Element right) {
+    Element result;
+    for (int d = 0; d < D; d++) {
+        result.a[d] = right.a[d] * left.a[d];
+        result.b[d] = right.a[d] * left.b[d] + right.b[d];
+    }
+    return result;
+}
+
+/*
 // Identity element: A = I (identity matrix), b = 0
 __device__ inline Element identity() {
     Element e;
@@ -50,5 +69,6 @@ __device__ inline Element combine(Element left, Element right) {
 
     return result;
 }
+*/
 
 #endif // COMMON_CUH
