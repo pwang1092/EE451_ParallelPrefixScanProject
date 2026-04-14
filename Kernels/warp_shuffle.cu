@@ -73,20 +73,20 @@ struct WarpShuffle {
         // Shared storage for per-warp totals (max 32 warps = 1024 threads/block)
         __shared__ Element warp_totals[32];
 
-        // --- Step 1: load element (identity for out-of-range threads) ---
+        // Step 1: load element (identity for out-of-range threads)
         Element val = (tid < n) ? shared_data[tid] : identity();
 
-        // --- Step 2: warp-level inclusive scan via shuffle ---
+        // Step 2: warp-level inclusive scan via shuffle ---
         val = warp_inclusive_scan(val);
 
-        // --- Step 3: last active lane in each warp saves its total ---
+        // Step 3: last active lane in each warp saves its total
         // "Last active" = min(lane 31, last thread in block that is < n)
         bool is_last_in_warp = (lane == 31) || (tid == n - 1);
         if (is_last_in_warp)
             warp_totals[warp_id] = val;
         __syncthreads();
 
-        // --- Step 4: first warp scans the warp totals ---
+        // Step 4: first warp scans the warp totals
         if (warp_id == 0) {
             Element wt = (tid < num_warps) ? warp_totals[tid] : identity();
             wt = warp_inclusive_scan(wt);
@@ -95,11 +95,11 @@ struct WarpShuffle {
         }
         __syncthreads();
 
-        // --- Step 5: add preceding warp's total to every thread ---
+        // Step 5: add preceding warp's total to every thread
         if (warp_id > 0)
             val = combine(warp_totals[warp_id - 1], val);
 
-        // --- Write back ---
+        // Write back
         if (tid < n)
             shared_data[tid] = val;
 
