@@ -1,0 +1,21 @@
+Node:  b02-20.hpc.usc.edu
+GPU:   NVIDIA A100-PCIE-40GB
+Start: Wed Apr 15 22:42:55 PDT 2026
+
+=== D=16 ===
+WarpShuffle correctness test  D=16  BLOCK_SIZE=256
+
+L=32   D=16      max_err=4.81e-07  n_errors=0/512  PASS
+L=64   D=16      max_err=4.81e-07  n_errors=0/1024  PASS
+L=128  D=16      max_err=9.54e-07  n_errors=0/2048  PASS
+L=256  D=16      max_err=9.54e-07  n_errors=0/4096  PASS
+
+ALL TESTS PASSED
+
+=== D=64 ===
+
+=== D=256 ===
+
+=== D=512 ===
+
+End: Wed Apr 15 22:43:15 PDT 2026

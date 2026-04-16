@@ -1,0 +1,30 @@
+test_warp_shuffle.cu(103): warning #177-D: variable "n" was declared but never referenced
+          size_t n = (size_t)L * 16;
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+test_warp_shuffle.cu(103): warning #177-D: variable "n" was declared but never referenced
+          size_t n = (size_t)L * 64;
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas error   : Entry function '_Z19warp_shuffle_kernelP7ElementS0_i' uses too much shared data (0x24000 bytes, 0x18000 max)
+/var/spool/slurm/d/job8023937/slurm_script: line 27: ./test_ws_D64: No such file or directory
+test_warp_shuffle.cu(103): warning #177-D: variable "n" was declared but never referenced
+          size_t n = (size_t)L * 256;
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas error   : Entry function '_Z19warp_shuffle_kernelP7ElementS0_i' uses too much shared data (0x90000 bytes, 0x18000 max)
+/var/spool/slurm/d/job8023937/slurm_script: line 27: ./test_ws_D256: No such file or directory
+test_warp_shuffle.cu(103): warning #177-D: variable "n" was declared but never referenced
+          size_t n = (size_t)L * 512;
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas error   : Entry function '_Z19warp_shuffle_kernelP7ElementS0_i' uses too much shared data (0x120000 bytes, 0x18000 max)
+/var/spool/slurm/d/job8023937/slurm_script: line 27: ./test_ws_D512: No such file or directory
