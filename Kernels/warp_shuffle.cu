@@ -19,8 +19,8 @@
  *   occupancy — this is one of the hypotheses we test in the benchmark.
  */
 
-#include "common.cuh"
-#include "warp_shuffle.cuh"
+#include "common.cuh"        // Element, combine, identity — must come first
+#include "warp_shuffle.cuh"  // undef + redefines BLOCK_SIZE to D-scaled value
 
 // ---------------------------------------------------------------------------
 // Shuffle a full Element up by `delta` lanes within the warp.
@@ -71,8 +71,10 @@ struct WarpShuffle {
         const int warp_id = tid >> 5;
         const int num_warps = (blockDim.x + 31) >> 5;
 
-        // Shared storage for per-warp totals (max 32 warps = 1024 threads/block)
-        __shared__ Element warp_totals[32];
+        // Shared storage for per-warp totals.
+        // Sized to BLOCK_SIZE/32 + 1 to match the D-scaled BLOCK_SIZE
+        // (e.g. D=512 gives BLOCK_SIZE=16, only 1 warp, so 2 slots needed)
+        __shared__ Element warp_totals[BLOCK_SIZE / 32 + 1];
 
         // Step 1: load element (identity for out-of-range threads)
         Element val = (tid < n) ? shared_data[tid] : identity();

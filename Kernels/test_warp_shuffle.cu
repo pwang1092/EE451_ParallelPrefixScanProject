@@ -19,8 +19,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <vector>
-#include "common.cuh"
-#include "warp_shuffle.cu"
+#include "warp_shuffle.cu"   // pulls in common.cuh then warp_shuffle.cuh — do not include either directly
 
 
 // Kernel: one block, one scan
@@ -57,18 +56,17 @@ static bool load_ref(const char* path, float* x, size_t n) {
 }
 
 // ---------------------------------------------------------------------------
-// Compare GPU output (Element array) against reference x array
-// The reference stores x[t,d] = final hidden state.
-// Our Element.b[d] after the scan holds exactly x[t,d].
+// Compare GPU output (Element array) against reference x array.
+// Element.b[d] after the scan holds exactly x[t,d].
 // ---------------------------------------------------------------------------
 static bool check(const Element* gpu_out, const float* ref, int L, float tol = 1e-4f) {
     int n_errors = 0;
     float max_err = 0.f;
     for (int t = 0; t < L; t++) {
         for (int d = 0; d < D; d++) {
-            float got = gpu_out[t].b[d];
+            float got      = gpu_out[t].b[d];
             float expected = ref[t * D + d];
-            float err = fabsf(got - expected);
+            float err      = fabsf(got - expected);
             if (err > max_err) max_err = err;
             if (err > tol) {
                 if (n_errors < 5)
@@ -84,13 +82,17 @@ static bool check(const Element* gpu_out, const float* ref, int L, float tol = 1
 }
 
 
-// ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
     const char* indir  = (argc > 1) ? argv[1] : "../SyntheticData/inputs";
     const char* refdir = (argc > 2) ? argv[2] : "../SequentialBaseline/SequentialData";
 
-    // Only test L <= BLOCK_SIZE since we have no chunked wrapper yet
-    const int TEST_LENGTHS[] = { 32, 64, 128, 256 };
+    // Test lengths scale with BLOCK_SIZE (which is D-dependent)
+    const int TEST_LENGTHS[] = {
+        BLOCK_SIZE / 8,
+        BLOCK_SIZE / 4,
+        BLOCK_SIZE / 2,
+        BLOCK_SIZE
+    };
     const int N_L = sizeof(TEST_LENGTHS) / sizeof(TEST_LENGTHS[0]);
 
     printf("WarpShuffle correctness test  D=%d  BLOCK_SIZE=%d\n\n", D, BLOCK_SIZE);
@@ -100,11 +102,8 @@ int main(int argc, char* argv[]) {
     for (int li = 0; li < N_L; li++) {
         int L = TEST_LENGTHS[li];
         int B = 1;
-        size_t n = (size_t)L * D;
 
-        // --- load inputs ---
-        // Find the smallest L in our files that is >= test L
-        // We generated files for L=1024 and up, so load L=1024 and use first L elements
+        // Load from L=1024 file, use first L elements
         char inpath[256];
         snprintf(inpath, sizeof(inpath), "%s/input_B%d_L1024_D%d.bin", indir, B, D);
 
@@ -114,7 +113,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // --- load reference (also from L=1024 file, use first L elements) ---
+        // Load reference (from L=1024 file, use first L elements)
         char refpath[256];
         snprintf(refpath, sizeof(refpath), "%s/ref_B%d_L1024_D%d.bin", refdir, B, D);
         std::vector<float> ref(1024 * D);
@@ -123,7 +122,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // --- pack into Element array ---
+        // Pack into Element array
         std::vector<Element> h_in(L), h_out(L);
         for (int t = 0; t < L; t++) {
             for (int d = 0; d < D; d++) {
@@ -132,17 +131,16 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // --- copy to device ---
+        // Copy to device
         Element *d_in, *d_out;
         cudaMalloc(&d_in,  L * sizeof(Element));
         cudaMalloc(&d_out, L * sizeof(Element));
         cudaMemcpy(d_in, h_in.data(), L * sizeof(Element), cudaMemcpyHostToDevice);
 
-        // --- run kernel ---
+        // Run kernel
         warp_shuffle_kernel<<<1, BLOCK_SIZE>>>(d_in, d_out, L);
         cudaDeviceSynchronize();
 
-        // check for kernel errors
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("L=%d: CUDA error: %s\n", L, cudaGetErrorString(err));
@@ -151,10 +149,8 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        // --- copy back ---
         cudaMemcpy(h_out.data(), d_out, L * sizeof(Element), cudaMemcpyDeviceToHost);
 
-        // --- check ---
         printf("L=%-4d D=%-4d  ", L, D);
         bool pass = check(h_out.data(), ref.data(), L);
         all_pass = all_pass && pass;
