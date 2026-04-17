@@ -12,7 +12,9 @@ run_reference
 
 # SLURM logs
 *.err
-logs/
 
 # Nsight outputs
 nsight_outputs/
+
+._*
+.DS_Store
