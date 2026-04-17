@@ -20,6 +20,7 @@
  */
 
 #include "common.cuh"
+#include "warp_shuffle.cuh"
 
 // ---------------------------------------------------------------------------
 // Shuffle a full Element up by `delta` lanes within the warp.
