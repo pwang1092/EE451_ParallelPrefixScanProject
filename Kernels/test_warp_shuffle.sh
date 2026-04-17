@@ -23,7 +23,7 @@ echo ""
 
 for D in 16 64 256 512; do
     echo "=== D=$D ==="
-    nvcc -O2 -std=c++17 -DD=$D --maxrregcount=64 -o test_ws_D${D} test_warp_shuffle.cu
+    nvcc -O2 -std=c++17 -arch=sm_80 -DD=$D --maxrregcount=64 -v -o test_ws_D${D} test_warp_shuffle.cu
     ./test_ws_D${D}
     echo ""
 done
