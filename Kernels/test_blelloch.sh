@@ -21,9 +21,9 @@ echo "GPU:   $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 echo "Start: $(date)"
 echo ""
 
-for D in 16 ; do
+for D in 16 64 256 512; do
     echo "=== D=$D ==="
-    nvcc -O2 -std=c++17 -DD=$D -o test_blelloch_D${D} test_blelloch.cu
+    nvcc -O2 -std=c++17 -arch=sm_80 -DD=$D --maxrregcount=64 -o test_blelloch_D${D} test_blelloch.cu
     ./test_blelloch_D${D}
     echo ""
 done
