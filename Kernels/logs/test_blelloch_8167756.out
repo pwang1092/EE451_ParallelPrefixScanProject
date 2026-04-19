@@ -1,0 +1,45 @@
+Node:  b02-06.hpc.usc.edu
+GPU:   NVIDIA A100-PCIE-40GB
+Start: Sat Apr 18 22:31:19 PDT 2026
+
+=== D=16 ===
+Blelloch correctness test  D=16  BLOCK_SIZE=512
+
+L=64   D=16      max_err=5.07e-07  n_errors=0/1024  PASS
+L=128  D=16      max_err=9.54e-07  n_errors=0/2048  PASS
+L=256  D=16      max_err=9.54e-07  n_errors=0/4096  PASS
+L=512  D=16      max_err=9.54e-07  n_errors=0/8192  PASS
+
+ALL TESTS PASSED
+
+=== D=64 ===
+Blelloch correctness test  D=64  BLOCK_SIZE=128
+
+L=16   D=64      max_err=4.77e-07  n_errors=0/1024  PASS
+L=32   D=64      max_err=4.77e-07  n_errors=0/2048  PASS
+L=64   D=64      max_err=4.77e-07  n_errors=0/4096  PASS
+L=128  D=64      max_err=9.54e-07  n_errors=0/8192  PASS
+
+ALL TESTS PASSED
+
+=== D=256 ===
+Blelloch correctness test  D=256  BLOCK_SIZE=32
+
+L=4    D=256     max_err=4.77e-07  n_errors=0/1024  PASS
+L=8    D=256     max_err=4.77e-07  n_errors=0/2048  PASS
+L=16   D=256     max_err=4.77e-07  n_errors=0/4096  PASS
+L=32   D=256     max_err=9.54e-07  n_errors=0/8192  PASS
+
+ALL TESTS PASSED
+
+=== D=512 ===
+Blelloch correctness test  D=512  BLOCK_SIZE=16
+
+L=2    D=512     max_err=2.38e-07  n_errors=0/1024  PASS
+L=4    D=512     max_err=4.77e-07  n_errors=0/2048  PASS
+L=8    D=512     max_err=4.77e-07  n_errors=0/4096  PASS
+L=16   D=512     max_err=7.15e-07  n_errors=0/8192  PASS
+
+ALL TESTS PASSED
+
+End: Sat Apr 18 22:31:32 PDT 2026
