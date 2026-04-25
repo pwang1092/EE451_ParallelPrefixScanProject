@@ -1,30 +1,58 @@
-#ifndef CHUNKED_HIERARCHICAL_RECURSIVE_CUH
-#define CHUNKED_HIERARCHICAL_RECURSIVE_CUH
+#ifndef CHUNKED_HIERARCHICAL_CUH
+#define CHUNKED_HIERARCHICAL_CUH
 
-#include <cassert>
 #include "common.cuh"
 #include "hillis_steele.cuh"
 #include "blelloch.cuh"
 #include "warp_shuffle.cuh"
 
-// Phase 1: each block runs a local scan over its chunk of the input.
-// Results are correct relative to each block only; block totals saved separately.
-template <typename ScanImpl>
-__global__ void phase1_local_scan(const Element* __restrict__ input,
-                                   Element* __restrict__ output,
-                                   Element* __restrict__ block_totals,
-                                   int L) {
-    __shared__ Element shared_data[BLOCK_SIZE];
+// ---------------------------------------------------------------------------
+// BLOCK_SIZE conflict fix:
+// All three .cuh files undef+redefine BLOCK_SIZE, so the last included wins.
+// We define CHUNK_SIZE separately as the minimum BLOCK_SIZE across all kernels
+// so all three ScanImpl variants fit within their shared memory budgets.
+//
+//   D=16:  min(512, 512, 512) = 512
+//   D=64:  min(256, 128, 128) = 128
+//   D=256: min(64,  32,  32)  = 32
+//   D=512: min(32,  16,  16)  = 16
+// ---------------------------------------------------------------------------
+#ifdef CHUNK_SIZE
+#undef CHUNK_SIZE
+#endif
 
-    int block_start = blockIdx.x * BLOCK_SIZE;
-    int tid = threadIdx.x;
-    int global_idx = block_start + tid;
+#if D <= 16
+#define CHUNK_SIZE 512
+#elif D <= 64
+#define CHUNK_SIZE 128
+#elif D <= 256
+#define CHUNK_SIZE 32
+#else
+#define CHUNK_SIZE 16
+#endif
+
+// ---------------------------------------------------------------------------
+// Phase 1: each block scans its own chunk independently.
+// block_totals[i] = inclusive prefix total of chunk i after this phase.
+// ---------------------------------------------------------------------------
+template <typename ScanImpl>
+__global__ void phase1_local_scan(
+    const Element* __restrict__ input,
+          Element* __restrict__ output,
+          Element* __restrict__ block_totals,
+    int L)
+{
+    __shared__ Element shared_data[CHUNK_SIZE];
+
+    int block_start = blockIdx.x * CHUNK_SIZE;
+    int tid         = threadIdx.x;
+    int global_idx  = block_start + tid;
 
     shared_data[tid] = (global_idx < L) ? input[global_idx] : identity();
     __syncthreads();
 
     Element total;
-    ScanImpl::block_scan(shared_data, BLOCK_SIZE, &total);
+    ScanImpl::block_scan(shared_data, CHUNK_SIZE, &total);
     __syncthreads();
 
     if (global_idx < L)
@@ -34,15 +62,17 @@ __global__ void phase1_local_scan(const Element* __restrict__ input,
         block_totals[blockIdx.x] = total;
 }
 
-// Phase 2: scan the block totals so that block_totals[i] holds the prefix
-// for all elements in blocks 0..i. Requires num_blocks <= BLOCK_SIZE.
+// ---------------------------------------------------------------------------
+// Phase 2 (single-block): scan the block totals array when it fits in one block.
+// ---------------------------------------------------------------------------
 template <typename ScanImpl>
-__global__ void phase2_scan_totals(Element* __restrict__ block_totals,
-                                    int num_blocks) {
-    __shared__ Element shared_data[BLOCK_SIZE];
+__global__ void phase2_scan_totals(
+    Element* __restrict__ block_totals,
+    int num_blocks)
+{
+    __shared__ Element shared_data[CHUNK_SIZE];
 
     int tid = threadIdx.x;
-
     shared_data[tid] = (tid < num_blocks) ? block_totals[tid] : identity();
     __syncthreads();
 
@@ -54,42 +84,70 @@ __global__ void phase2_scan_totals(Element* __restrict__ block_totals,
         block_totals[tid] = shared_data[tid];
 }
 
-// Phase 3: propagate block prefixes into each block's locally-scanned output.
+// ---------------------------------------------------------------------------
+// Phase 3: add preceding block's scanned total into each element.
 // Block 0 is already globally correct and returns immediately.
-__global__ void phase3_propagate(Element* __restrict__ output,
-                                  const Element* __restrict__ block_totals,
-                                  int L) {
+// ---------------------------------------------------------------------------
+__global__ void phase3_propagate(
+          Element* __restrict__ output,
+    const Element* __restrict__ block_totals,
+    int L)
+{
     if (blockIdx.x == 0) return;
 
-    int global_idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int global_idx = blockIdx.x * CHUNK_SIZE + threadIdx.x;
     if (global_idx >= L) return;
 
-    Element prefix = block_totals[blockIdx.x - 1];
-    output[global_idx] = combine(prefix, output[global_idx]);
+    output[global_idx] = combine(block_totals[blockIdx.x - 1], output[global_idx]);
 }
 
-// Host launch function. Allocates temp storage and runs all three phases.
-// Limitation: num_blocks must be <= BLOCK_SIZE (256), i.e. L <= 65536.
-// For L > 65536, Phase 2 would need to be applied recursively.
+// ---------------------------------------------------------------------------
+// chunked_scan — recursive 3-phase scan supporting arbitrary L.
+//
+// Phase 2 recurses if num_blocks > CHUNK_SIZE. For L=131072 at any D this
+// is at most 2 levels deep:
+//   L=131072, CHUNK_SIZE=16 → 8192 blocks → recurse:
+//     8192 block totals, CHUNK_SIZE=16 → 512 blocks → recurse:
+//       512 block totals, CHUNK_SIZE=16 → 32 blocks → fits, done
+// ---------------------------------------------------------------------------
 template <typename ScanImpl>
-void chunked_scan(Element* d_input, Element* d_output, int L) {
-    int num_blocks = (L + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    assert(num_blocks <= BLOCK_SIZE &&
-           "chunked_scan: L too large — Phase 2 fits at most BLOCK_SIZE^2 elements");
+void chunked_scan(Element* d_input, Element* d_output, int L)
+{
+    if (L <= 0) return;
 
+    int num_blocks = (L + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+    // Allocate block totals
     Element* d_block_totals;
     cudaMalloc(&d_block_totals, num_blocks * sizeof(Element));
 
-    phase1_local_scan<ScanImpl><<<num_blocks, BLOCK_SIZE>>>(
+    // Phase 1: local scan per block, opt into extended shared memory
+    size_t shmem = CHUNK_SIZE * sizeof(Element);
+    cudaFuncSetAttribute(phase1_local_scan<ScanImpl>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
+    phase1_local_scan<ScanImpl><<<num_blocks, CHUNK_SIZE>>>(
         d_input, d_output, d_block_totals, L);
 
-    phase2_scan_totals<ScanImpl><<<1, BLOCK_SIZE>>>(
-        d_block_totals, num_blocks);
+    // Phase 2: scan the block totals
+    if (num_blocks <= CHUNK_SIZE) {
+        // Fits in a single block
+        cudaFuncSetAttribute(phase2_scan_totals<ScanImpl>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
+        phase2_scan_totals<ScanImpl><<<1, CHUNK_SIZE>>>(d_block_totals, num_blocks);
+    } else {
+        // Recurse — treat block totals as a new sequence to scan
+        Element* d_scanned_totals;
+        cudaMalloc(&d_scanned_totals, num_blocks * sizeof(Element));
+        chunked_scan<ScanImpl>(d_block_totals, d_scanned_totals, num_blocks);
+        cudaMemcpy(d_block_totals, d_scanned_totals,
+                   num_blocks * sizeof(Element), cudaMemcpyDeviceToDevice);
+        cudaFree(d_scanned_totals);
+    }
 
-    phase3_propagate<<<num_blocks, BLOCK_SIZE>>>(
-        d_output, d_block_totals, L);
+    // Phase 3: propagate block prefixes
+    phase3_propagate<<<num_blocks, CHUNK_SIZE>>>(d_output, d_block_totals, L);
 
     cudaFree(d_block_totals);
 }
 
-#endif // CHUNKED_HIERARCHICAL_RECURSIVE_CUH
+#endif // CHUNKED_HIERARCHICAL_CUH
