@@ -1,0 +1,48 @@
+==========================================
+SLURM_JOB_ID = 8266545
+SLURM_JOB_NODELIST = b04-14
+TMPDIR = /tmp/SLURM_8266545
+==========================================
+Node:  b04-14.hpc.usc.edu
+GPU:   NVIDIA A100 80GB PCIe
+Start: Tue Apr 21 22:19:21 PDT 2026
+
+=== D=16 ===
+HillisSteele correctness test  D=16  BLOCK_SIZE=256
+
+L=32   D=16      max_err=4.81e-07  n_errors=0/512  PASS
+L=64   D=16      max_err=4.81e-07  n_errors=0/1024  PASS
+L=128  D=16      max_err=4.81e-07  n_errors=0/2048  PASS
+L=256  D=16      max_err=9.54e-07  n_errors=0/4096  PASS
+
+ALL TESTS PASSED
+
+=== D=64 ===
+HillisSteele correctness test  D=64  BLOCK_SIZE=64
+
+L=8    D=64      max_err=2.38e-07  n_errors=0/512  PASS
+L=16   D=64      max_err=4.77e-07  n_errors=0/1024  PASS
+L=32   D=64      max_err=4.77e-07  n_errors=0/2048  PASS
+L=64   D=64      max_err=9.54e-07  n_errors=0/4096  PASS
+
+ALL TESTS PASSED
+
+=== D=256 ===
+HillisSteele correctness test  D=256  BLOCK_SIZE=16
+
+L=2    D=256     max_err=4.77e-07  n_errors=0/512  PASS
+L=4    D=256     max_err=4.77e-07  n_errors=0/1024  PASS
+L=8    D=256     max_err=4.77e-07  n_errors=0/2048  PASS
+L=16   D=256     max_err=9.54e-07  n_errors=0/4096  PASS
+
+ALL TESTS PASSED
+
+=== D=512 ===
+HillisSteele correctness test  D=512  BLOCK_SIZE=8
+
+L=1    D=512     max_err=0.00e+00  n_errors=0/512  PASS
+L=2    D=512     max_err=2.38e-07  n_errors=0/1024  PASS
+L=4    D=512     max_err=4.77e-07  n_errors=0/2048  PASS
+L=8    D=512     max_err=4.77e-07  n_errors=0/4096  PASS
+
+ALL TESTS PASSED
