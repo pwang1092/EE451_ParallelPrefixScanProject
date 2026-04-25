@@ -1,8 +1,8 @@
 /**
  * probe_warp_shuffle.cu — Find the maximum L per block for WarpShuffle at each D.
  *
- * Increments L (power-of-2) until a CUDA error occurs, reporting the last
- * successful L and the shared memory usage at that point.
+ * Uses dynamic shared memory so it can probe beyond the statically-defined
+ * BLOCK_SIZE limit and find the true hardware ceiling.
  *
  * Build:
  *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=16  --maxrregcount=64 -o probe_ws_D16  probe_warp_shuffle.cu
@@ -13,12 +13,16 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cmath>
 #include <vector>
 #include "warp_shuffle.cu"  // pulls in common.cuh then warp_shuffle.cuh
 
-__global__ void warp_shuffle_kernel(Element* d_in, Element* d_out, int L) {
-    __shared__ Element shared_data[BLOCK_SIZE];
+static constexpr size_t DEFAULT_SHMEM_LIMIT  = 48 * 1024;
+static constexpr size_t EXTENDED_SHMEM_LIMIT = 96 * 1024;
+
+// Use dynamic shared memory so the probe kernel isn't limited by
+// the static BLOCK_SIZE — we want to find the real hardware ceiling.
+__global__ void probe_kernel(Element* d_in, Element* d_out, int L) {
+    extern __shared__ Element shared_data[];
     __shared__ Element block_total;
 
     int tid = threadIdx.x;
@@ -32,27 +36,27 @@ __global__ void warp_shuffle_kernel(Element* d_in, Element* d_out, int L) {
 
 int main() {
     printf("WarpShuffle shared memory probe  D=%d  BLOCK_SIZE=%d\n\n", D, BLOCK_SIZE);
-    printf("  Shared memory per block = (BLOCK_SIZE + BLOCK_SIZE/32 + 1) * 2 * D * 4 bytes\n");
-    printf("  = (%d + %d + 1) * %d * 4 = %zu bytes = %.1f KB\n\n",
-           BLOCK_SIZE, BLOCK_SIZE/32,
-           2*D,
-           (size_t)(BLOCK_SIZE + BLOCK_SIZE/32 + 1) * 2 * D * 4,
-           (BLOCK_SIZE + BLOCK_SIZE/32 + 1) * 2.0 * D * 4 / 1024.0);
+    printf("  Default shmem limit:  48KB (no opt-in needed)\n");
+    printf("  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)\n\n");
 
-    printf("%-8s %-12s %-10s %-s\n", "L", "shmem_KB", "threads", "result");
-    printf("%.50s\n", "--------------------------------------------------");
+    printf("%-8s %-12s %-10s %-24s %-s\n", "L", "shmem_KB", "threads", "shmem_regime", "result");
+    printf("%.72s\n", "------------------------------------------------------------------------");
 
     int last_pass = -1;
-    // probe from 32 up to 1024 in powers of 2
-    for (int L = 32; L <= 1024; L *= 2) {
-        if (L > BLOCK_SIZE) {
-            printf("%-8d %-12s %-10s SKIP (exceeds BLOCK_SIZE=%d)\n",
-                   L, "-", "-", BLOCK_SIZE);
-            continue;
-        }
 
-        size_t shmem = (size_t)(BLOCK_SIZE + BLOCK_SIZE/32 + 1) * sizeof(Element);
-        double shmem_kb = shmem / 1024.0;
+    for (int L = 32; L <= 2048; L *= 2) {
+        // shared memory: shared_data[L] + warp_totals[L/32 + 1]
+        size_t shared_bytes = (size_t)(L + L/32 + 1) * sizeof(Element);
+        double shmem_kb = shared_bytes / 1024.0;
+        int num_threads = L;  // warp shuffle uses one thread per element
+
+        const char* regime;
+        if (shared_bytes <= DEFAULT_SHMEM_LIMIT)
+            regime = "default (<=48KB)";
+        else if (shared_bytes <= EXTENDED_SHMEM_LIMIT)
+            regime = "*** extended (>48KB) ***";
+        else
+            regime = "EXCEEDS 96KB";
 
         std::vector<Element> h_in(L), h_out(L);
         for (int t = 0; t < L; t++)
@@ -66,12 +70,16 @@ int main() {
         cudaMalloc(&d_out, L * sizeof(Element));
         cudaMemcpy(d_in, h_in.data(), L * sizeof(Element), cudaMemcpyHostToDevice);
 
-        warp_shuffle_kernel<<<1, BLOCK_SIZE>>>(d_in, d_out, L);
+        cudaFuncSetAttribute(probe_kernel,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             shared_bytes);
+
+        probe_kernel<<<1, num_threads, shared_bytes>>>(d_in, d_out, L);
         cudaDeviceSynchronize();
         cudaError_t err = cudaGetLastError();
 
-        printf("%-8d %-12.1f %-10d %s\n",
-               L, shmem_kb, BLOCK_SIZE,
+        printf("%-8d %-12.1f %-10d %-24s %s\n",
+               L, shmem_kb, num_threads, regime,
                err == cudaSuccess ? "PASS" : cudaGetErrorString(err));
 
         if (err == cudaSuccess) last_pass = L;
