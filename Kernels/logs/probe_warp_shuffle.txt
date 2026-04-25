@@ -1,7 +1,7 @@
 Probe: warp_shuffle  GPU: A100 SXM4  arch=sm_80
 
 --- D=16 ---
-WarpShuffle shared memory probe  D=16  BLOCK_SIZE=256
+WarpShuffle shared memory probe  D=16  BLOCK_SIZE=512
 
   Default shmem limit:  48KB (no opt-in needed)
   Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
@@ -19,7 +19,7 @@ L        shmem_KB     threads    shmem_regime             result
 Max L per block for D=16: 1024
 
 --- D=64 ---
-WarpShuffle shared memory probe  D=64  BLOCK_SIZE=128
+WarpShuffle shared memory probe  D=64  BLOCK_SIZE=256
 
   Default shmem limit:  48KB (no opt-in needed)
   Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
@@ -35,7 +35,7 @@ L        shmem_KB     threads    shmem_regime             result
 Max L per block for D=64: 256
 
 --- D=256 ---
-WarpShuffle shared memory probe  D=256  BLOCK_SIZE=32
+WarpShuffle shared memory probe  D=256  BLOCK_SIZE=64
 
   Default shmem limit:  48KB (no opt-in needed)
   Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
@@ -49,7 +49,7 @@ L        shmem_KB     threads    shmem_regime             result
 Max L per block for D=256: 64
 
 --- D=512 ---
-WarpShuffle shared memory probe  D=512  BLOCK_SIZE=16
+WarpShuffle shared memory probe  D=512  BLOCK_SIZE=32
 
   Default shmem limit:  48KB (no opt-in needed)
   Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
