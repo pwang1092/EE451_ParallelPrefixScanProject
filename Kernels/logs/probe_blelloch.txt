@@ -1,0 +1,63 @@
+Probe: blelloch  GPU: A100 SXM4  arch=sm_80
+
+--- D=16 ---
+Blelloch shared memory probe  D=16  BLOCK_SIZE=512
+
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime         result
+----------------------------------------------------------------------
+32       4.0          16         default (<=48KB)     PASS
+64       8.1          32         default (<=48KB)     PASS
+128      16.4         64         default (<=48KB)     PASS
+256      32.9         128        default (<=48KB)     PASS
+512      65.9         256        *** extended (>48KB) *** PASS
+1024     131.9        512        EXCEEDS 96KB         PASS
+2048     264.0        1024       EXCEEDS 96KB         invalid argument
+
+Max L per block for D=16: 1024
+
+--- D=64 ---
+Blelloch shared memory probe  D=64  BLOCK_SIZE=128
+
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime         result
+----------------------------------------------------------------------
+32       16.0         16         default (<=48KB)     PASS
+64       32.5         32         default (<=48KB)     PASS
+128      65.5         64         *** extended (>48KB) *** PASS
+256      131.5        128        EXCEEDS 96KB         PASS
+512      263.5        256        EXCEEDS 96KB         invalid argument
+
+Max L per block for D=64: 256
+
+--- D=256 ---
+Blelloch shared memory probe  D=256  BLOCK_SIZE=32
+
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime         result
+----------------------------------------------------------------------
+32       64.0         16         *** extended (>48KB) *** PASS
+64       130.0        32         EXCEEDS 96KB         PASS
+128      262.0        64         EXCEEDS 96KB         invalid argument
+
+Max L per block for D=256: 64
+
+--- D=512 ---
+Blelloch shared memory probe  D=512  BLOCK_SIZE=16
+
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime         result
+----------------------------------------------------------------------
+32       128.0        16         EXCEEDS 96KB         PASS
+64       260.0        32         EXCEEDS 96KB         invalid argument
+
+Max L per block for D=512: 32
+

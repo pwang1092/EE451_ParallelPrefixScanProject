@@ -1,0 +1,63 @@
+Probe: warp_shuffle  GPU: A100 SXM4  arch=sm_80
+
+--- D=16 ---
+WarpShuffle shared memory probe  D=16  BLOCK_SIZE=256
+
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime             result
+------------------------------------------------------------------------
+32       4.2          32         default (<=48KB)         PASS
+64       8.4          64         default (<=48KB)         PASS
+128      16.6         128        default (<=48KB)         PASS
+256      33.1         256        default (<=48KB)         PASS
+512      66.1         512        *** extended (>48KB) *** PASS
+1024     132.1        1024       EXCEEDS 96KB             PASS
+2048     264.1        2048       EXCEEDS 96KB             invalid configuration argument
+
+Max L per block for D=16: 1024
+
+--- D=64 ---
+WarpShuffle shared memory probe  D=64  BLOCK_SIZE=128
+
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime             result
+------------------------------------------------------------------------
+32       17.0         32         default (<=48KB)         PASS
+64       33.5         64         default (<=48KB)         PASS
+128      66.5         128        *** extended (>48KB) *** PASS
+256      132.5        256        EXCEEDS 96KB             PASS
+512      264.5        512        EXCEEDS 96KB             invalid argument
+
+Max L per block for D=64: 256
+
+--- D=256 ---
+WarpShuffle shared memory probe  D=256  BLOCK_SIZE=32
+
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime             result
+------------------------------------------------------------------------
+32       68.0         32         *** extended (>48KB) *** PASS
+64       134.0        64         EXCEEDS 96KB             PASS
+128      266.0        128        EXCEEDS 96KB             invalid argument
+
+Max L per block for D=256: 64
+
+--- D=512 ---
+WarpShuffle shared memory probe  D=512  BLOCK_SIZE=16
+
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime             result
+------------------------------------------------------------------------
+32       136.0        32         EXCEEDS 96KB             PASS
+64       268.0        64         EXCEEDS 96KB             invalid argument
+
+Max L per block for D=512: 32
+
