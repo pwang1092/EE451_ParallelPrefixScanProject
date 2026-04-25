@@ -138,6 +138,12 @@ int main(int argc, char* argv[]) {
         cudaMemcpy(d_in, h_in.data(), L * sizeof(Element), cudaMemcpyHostToDevice);
 
         // Run kernel — static shared memory only, no dynamic allocation needed
+        // Opt into extended shared memory (up to 164KB on A100)
+        size_t shmem_bytes = (size_t)2 * BLOCK_SIZE * sizeof(Element);
+        cudaFuncSetAttribute(
+            hillis_steele_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            shmem_bytes);
         hillis_steele_kernel<<<1, BLOCK_SIZE>>>(d_in, d_out, L);
         cudaDeviceSynchronize();
 

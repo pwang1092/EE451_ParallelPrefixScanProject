@@ -138,6 +138,12 @@ int main(int argc, char* argv[]) {
         cudaMemcpy(d_in, h_in.data(), L * sizeof(Element), cudaMemcpyHostToDevice);
 
         // Run kernel
+        // Opt into extended shared memory (up to 164KB on A100)
+        size_t shmem_bytes = (size_t)(BLOCK_SIZE + BLOCK_SIZE/32 + 1) * sizeof(Element);
+        cudaFuncSetAttribute(
+            warp_shuffle_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            shmem_bytes);
         warp_shuffle_kernel<<<1, BLOCK_SIZE>>>(d_in, d_out, L);
         cudaDeviceSynchronize();
 
