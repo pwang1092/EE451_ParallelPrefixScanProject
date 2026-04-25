@@ -41,4 +41,14 @@ for D in 16 64 256 512; do
     echo ""
 done
 
+echo "=========================================="
+echo "HILLIS-STEELE PROBE"
+echo "=========================================="
+for D in 16 64 256 512; do
+    echo "--- D=$D ---"
+    nvcc -O2 -std=c++17 -arch=sm_80 -DD=$D --maxrregcount=64 -o probe_hs_D${D} probe_hillis_steele.cu
+    ./probe_hs_D${D}
+    echo ""
+done
+
 echo "End: $(date)"
