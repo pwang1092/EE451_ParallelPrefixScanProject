@@ -1,7 +1,7 @@
 Probe: hillis_steele  GPU: A100 SXM4  arch=sm_80
 
 --- D=16 ---
-HillisSteele shared memory probe  D=16  BLOCK_SIZE=256
+HillisSteele shared memory probe  D=16  BLOCK_SIZE=512
 
   HillisSteele needs 2 buffers: shared memory = 2 * L * sizeof(Element)
   Default shmem limit:  48KB (no opt-in needed)
@@ -24,7 +24,7 @@ L        shmem_KB     threads    shmem_regime             result
 Max L per block for D=16: 512
 
 --- D=64 ---
-HillisSteele shared memory probe  D=64  BLOCK_SIZE=64
+HillisSteele shared memory probe  D=64  BLOCK_SIZE=128
 
   HillisSteele needs 2 buffers: shared memory = 2 * L * sizeof(Element)
   Default shmem limit:  48KB (no opt-in needed)
@@ -45,7 +45,7 @@ L        shmem_KB     threads    shmem_regime             result
 Max L per block for D=64: 128
 
 --- D=256 ---
-HillisSteele shared memory probe  D=256  BLOCK_SIZE=16
+HillisSteele shared memory probe  D=256  BLOCK_SIZE=32
 
   HillisSteele needs 2 buffers: shared memory = 2 * L * sizeof(Element)
   Default shmem limit:  48KB (no opt-in needed)
@@ -64,7 +64,7 @@ L        shmem_KB     threads    shmem_regime             result
 Max L per block for D=256: 32
 
 --- D=512 ---
-HillisSteele shared memory probe  D=512  BLOCK_SIZE=8
+HillisSteele shared memory probe  D=512  BLOCK_SIZE=16
 
   HillisSteele needs 2 buffers: shared memory = 2 * L * sizeof(Element)
   Default shmem limit:  48KB (no opt-in needed)
