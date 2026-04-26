@@ -29,7 +29,7 @@
 #include "warp_shuffle.cu"
 #include "blelloch.cu"
 #include "hillis_steele.cu"
-#include "chunked_hierarchical.cuh"
+#include "chunked_hierarchical_recursive.cuh"
 
 // ---------------------------------------------------------------------------
 // Sweep config — must match generate_inputs.cpp
