@@ -57,15 +57,18 @@ __global__ void phase1_local_scan(
     shared_data[tid] = (global_idx < L) ? input[global_idx] : identity();
     __syncthreads();
 
-    Element total;
-    ScanImpl::block_scan(shared_data, CHUNK_SIZE, &total);
+    __shared__ Element s_total;  // shared so any thread can write, thread 0 reads
+    ScanImpl::block_scan(shared_data, CHUNK_SIZE, &s_total);
     __syncthreads();
 
     if (global_idx < L)
         output[global_idx] = shared_data[tid];
 
-    if (tid == CHUNK_SIZE - 1)
-        block_totals[blockIdx.x] = total;
+    // s_total is in shared memory — valid for all threads regardless of which
+    // thread inside block_scan wrote to *block_total (thread 0 for Blelloch,
+    // thread n-1 for WarpShuffle and HillisSteele)
+    if (tid == 0)
+        block_totals[blockIdx.x] = s_total;
 }
 
 // ---------------------------------------------------------------------------
