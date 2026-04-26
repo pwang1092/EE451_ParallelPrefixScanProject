@@ -7,8 +7,7 @@
 #include "warp_shuffle.cuh"
 
 // ---------------------------------------------------------------------------
-// CHUNK_SIZE: minimum BLOCK_SIZE across all three kernels for given D,
-// ensuring every ScanImpl fits within its shared memory budget.
+// CHUNK_SIZE: minimum BLOCK_SIZE across all three kernels for given D.
 //   D=16:  min(512, 512, 512) = 512
 //   D=64:  min(256, 128, 128) = 128
 //   D=256: min(64,  32,  32)  = 32
@@ -29,8 +28,18 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// shmem_needed<ScanImpl>: returns how many Element slots the kernel needs.
+// HillisSteele needs 2*CHUNK_SIZE (double-buffer); others need CHUNK_SIZE.
+// ---------------------------------------------------------------------------
+template <typename ScanImpl>
+constexpr size_t shmem_elements() { return CHUNK_SIZE; }
+
+template <>
+constexpr size_t shmem_elements<HillisSteele>() { return 2 * CHUNK_SIZE; }
+
+// ---------------------------------------------------------------------------
 // Phase 1: each block scans its own chunk independently.
-// Uses dynamic shared memory to avoid compile-time ptxas limit.
+// Uses dynamic shared memory. HillisSteele callers pass 2*CHUNK_SIZE elements.
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
 __global__ void phase1_local_scan(
@@ -61,7 +70,6 @@ __global__ void phase1_local_scan(
 
 // ---------------------------------------------------------------------------
 // Phase 2 (single-block): scan block totals when they fit in one block.
-// Uses dynamic shared memory to avoid compile-time ptxas limit.
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
 __global__ void phase2_scan_totals(
@@ -84,7 +92,6 @@ __global__ void phase2_scan_totals(
 
 // ---------------------------------------------------------------------------
 // Phase 3: add preceding block's scanned total into each element.
-// Block 0 is already globally correct.
 // ---------------------------------------------------------------------------
 __global__ void phase3_propagate(
           Element* __restrict__ output,
@@ -101,7 +108,6 @@ __global__ void phase3_propagate(
 
 // ---------------------------------------------------------------------------
 // chunked_scan — recursive 3-phase scan supporting arbitrary L.
-// Phase 2 recurses if num_blocks > CHUNK_SIZE.
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
 void chunked_scan(Element* d_input, Element* d_output, int L)
@@ -109,18 +115,19 @@ void chunked_scan(Element* d_input, Element* d_output, int L)
     if (L <= 0) return;
 
     int num_blocks = (L + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    size_t shmem = CHUNK_SIZE * sizeof(Element);
+    // HillisSteele needs 2*CHUNK_SIZE for double-buffer; others need CHUNK_SIZE
+    size_t shmem = shmem_elements<ScanImpl>() * sizeof(Element);
 
     Element* d_block_totals;
     cudaMalloc(&d_block_totals, num_blocks * sizeof(Element));
 
-    // Phase 1: local scan per block
+    // Phase 1
     cudaFuncSetAttribute(phase1_local_scan<ScanImpl>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
     phase1_local_scan<ScanImpl><<<num_blocks, CHUNK_SIZE, shmem>>>(
         d_input, d_output, d_block_totals, L);
 
-    // Phase 2: scan block totals — recursive if too many blocks
+    // Phase 2 — recurse if num_blocks > CHUNK_SIZE
     if (num_blocks <= CHUNK_SIZE) {
         cudaFuncSetAttribute(phase2_scan_totals<ScanImpl>,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
@@ -135,7 +142,7 @@ void chunked_scan(Element* d_input, Element* d_output, int L)
         cudaFree(d_scanned_totals);
     }
 
-    // Phase 3: propagate block prefixes
+    // Phase 3
     phase3_propagate<<<num_blocks, CHUNK_SIZE>>>(d_output, d_block_totals, L);
 
     cudaFree(d_block_totals);
