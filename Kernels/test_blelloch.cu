@@ -34,8 +34,8 @@ __global__ void blelloch_kernel(Element* d_in, Element* d_out, int L) {
     if (tid < half) {
         int ai = tid;
         int bi = tid + half;
-        shared_data[phys(ai)] = d_in[ai];
-        shared_data[phys(bi)] = d_in[bi];
+        shared_data[ai] = d_in[ai];
+        shared_data[bi] = d_in[bi];
     }
     __syncthreads();
 
@@ -44,8 +44,8 @@ __global__ void blelloch_kernel(Element* d_in, Element* d_out, int L) {
     if (tid < half) {
         int ai = tid;
         int bi = tid + half;
-        d_out[ai] = shared_data[phys(ai)];
-        d_out[bi] = shared_data[phys(bi)];
+        d_out[ai] = shared_data[ai];
+        d_out[bi] = shared_data[bi];
     }
 }
 

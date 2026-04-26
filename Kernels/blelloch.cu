@@ -4,7 +4,19 @@
  * Implements Blelloch::block_scan per the common.cuh interface.
  *
  * Algorithm overview:
+ *   1. Up-sweep (reduce): combine pairs at stride 1, 2, 4, ... until root
+ *      holds total of all elements. O(N) work, log(N) steps.
+ *   2. Set root to identity (converts to exclusive scan).
+ *   3. Down-sweep (distribute): push partial sums back down the tree.
+ *      O(N) work, log(N) steps.
+ *   4. Convert exclusive -> inclusive by combining with saved originals.
+ *   5. Copy results from conflict-free (phys) positions to direct positions
+ *      so the generic chunked wrapper can read shared_data[tid] correctly.
  *
+ * Note on phys() indexing:
+ *   During computation, data is stored at shared_data[phys(i)] to avoid
+ *   shared memory bank conflicts. At the end of block_scan, results are
+ *   copied to shared_data[i] (direct) so callers can access them uniformly.
  */
 
 #include "common.cuh"       // Element, combine, identity — must come first
@@ -65,6 +77,15 @@ struct Blelloch {
         // Convert exclusive -> inclusive by combining with saved originals
         shared_data[phys(ai)] = combine(shared_data[phys(ai)], originalA);
         shared_data[phys(bi)] = combine(shared_data[phys(bi)], originalB);
+        __syncthreads();
+
+        // Copy from conflict-free positions to direct positions so callers
+        // can uniformly read shared_data[tid] (e.g. in chunked phase1).
+        Element tmp_a = shared_data[phys(ai)];
+        Element tmp_b = shared_data[phys(bi)];
+        __syncthreads();
+        shared_data[ai] = tmp_a;
+        shared_data[bi] = tmp_b;
         __syncthreads();
     }
 };
