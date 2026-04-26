@@ -69,7 +69,11 @@ static bool check_output(const Element* gpu_out, const float* ref, int L,
         for (int d = 0; d < D; d++) {
             float err = fabsf(gpu_out[t].b[d] - ref[t * D + d]);
             float rel = err / fmaxf(fabsf(ref[t * D + d]), 1e-6f);
-            if (err > tol && rel > tol) return false;
+            if (err > tol && rel > tol) {
+                printf("  MISMATCH t=%d d=%d gpu=%.6f ref=%.6f abserr=%.2e relerr=%.2e\n",
+                       t, d, gpu_out[t].b[d], ref[t * D + d], err, rel);
+                return false;
+            }
         }
     return true;
 }
