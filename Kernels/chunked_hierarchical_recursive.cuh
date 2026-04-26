@@ -64,7 +64,7 @@ __global__ void phase1_local_scan(
     if (global_idx < L)
         output[global_idx] = shared_data[tid];
 
-    if (tid == 0)
+    if (tid == CHUNK_SIZE - 1)
         block_totals[blockIdx.x] = total;
 }
 
