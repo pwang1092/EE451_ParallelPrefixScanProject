@@ -39,7 +39,6 @@ template <>
 constexpr size_t shmem_elements<HillisSteele>() { return 2 * CHUNK_SIZE; }
 
 constexpr size_t blelloch_padding(size_t i) {
-    // Must match CONFLICT_FREE_OFFSET(i) in blelloch.cu.
     return (i >> 5) + (i >> 10);
 }
 
@@ -50,7 +49,6 @@ constexpr size_t shmem_elements<Blelloch>() {
 
 // ---------------------------------------------------------------------------
 // Phase 1: each block scans its own chunk independently.
-// Uses dynamic shared memory. HillisSteele callers pass 2*CHUNK_SIZE elements.
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
 __global__ void phase1_local_scan(
@@ -68,16 +66,13 @@ __global__ void phase1_local_scan(
     shared_data[tid] = (global_idx < L) ? input[global_idx] : identity();
     __syncthreads();
 
-    __shared__ Element s_total;  // shared so any thread can write, thread 0 reads
+    __shared__ Element s_total;
     ScanImpl::block_scan(shared_data, CHUNK_SIZE, &s_total);
     __syncthreads();
 
     if (global_idx < L)
         output[global_idx] = shared_data[tid];
 
-    // s_total is in shared memory — valid for all threads regardless of which
-    // thread inside block_scan wrote to *block_total (thread 0 for Blelloch,
-    // thread n-1 for WarpShuffle and HillisSteele)
     if (tid == 0)
         block_totals[blockIdx.x] = s_total;
 }
@@ -121,19 +116,35 @@ __global__ void phase3_propagate(
 }
 
 // ---------------------------------------------------------------------------
-// chunked_scan — recursive 3-phase scan supporting arbitrary L.
+// chunked_scan_impl — internal recursive implementation using a pre-allocated
+// scratch buffer. The scratch pointer is advanced at each recursion level so
+// no cudaMalloc/cudaFree ever happens inside the timed region.
+//
+// Scratch layout (all levels combined, sizes in Elements):
+//   Level 1: num_blocks      = L / CHUNK_SIZE
+//   Level 2: num_blocks²     = L / CHUNK_SIZE²
+//   ...
+//   Total:   < L / (CHUNK_SIZE - 1)  << L
+//
+// So a scratch buffer of L Elements (allocated once by caller) covers all
+// levels with room to spare even at CHUNK_SIZE=16.
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
-void chunked_scan(Element* d_input, Element* d_output, int L)
+void chunked_scan_impl(
+    Element* d_input,
+    Element* d_output,
+    int L,
+    Element* d_scratch)   // pre-allocated, must hold at least num_blocks Elements
 {
     if (L <= 0) return;
 
     int num_blocks = (L + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    // HillisSteele needs 2*CHUNK_SIZE for double-buffer; others need CHUNK_SIZE
     size_t shmem = shmem_elements<ScanImpl>() * sizeof(Element);
 
-    Element* d_block_totals;
-    cudaMalloc(&d_block_totals, num_blocks * sizeof(Element));
+    // Carve block_totals from the front of scratch; advance scratch pointer
+    // for the next recursion level.
+    Element* d_block_totals  = d_scratch;
+    Element* d_scratch_next  = d_scratch + num_blocks;  // next level uses remainder
 
     // Phase 1
     cudaFuncSetAttribute(phase1_local_scan<ScanImpl>,
@@ -148,18 +159,49 @@ void chunked_scan(Element* d_input, Element* d_output, int L)
         phase2_scan_totals<ScanImpl><<<1, CHUNK_SIZE, shmem>>>(
             d_block_totals, num_blocks);
     } else {
-        Element* d_scanned_totals;
-        cudaMalloc(&d_scanned_totals, num_blocks * sizeof(Element));
-        chunked_scan<ScanImpl>(d_block_totals, d_scanned_totals, num_blocks);
+        // Scan block_totals in-place using a temporary output buffer carved
+        // from scratch. After the recursive call, d_scratch_next holds the
+        // scanned totals; copy back to d_block_totals.
+        Element* d_scanned_totals = d_scratch_next + num_blocks;
+        chunked_scan_impl<ScanImpl>(
+            d_block_totals, d_scanned_totals, num_blocks, d_scratch_next);
         cudaMemcpy(d_block_totals, d_scanned_totals,
                    num_blocks * sizeof(Element), cudaMemcpyDeviceToDevice);
-        cudaFree(d_scanned_totals);
     }
 
     // Phase 3
     phase3_propagate<<<num_blocks, CHUNK_SIZE>>>(d_output, d_block_totals, L);
+}
 
-    cudaFree(d_block_totals);
+// ---------------------------------------------------------------------------
+// chunked_scan — public interface.
+//
+// Two variants:
+//
+//   chunked_scan<ScanImpl>(d_in, d_out, L)
+//     Allocates scratch internally. Convenient but includes cudaMalloc cost.
+//     Use for correctness testing or one-off calls.
+//
+//   chunked_scan<ScanImpl>(d_in, d_out, L, d_scratch)
+//     Uses caller-provided scratch buffer (>= L Elements).
+//     No allocation inside — suitable for benchmarking.
+//     Pre-allocate once with: cudaMalloc(&d_scratch, L * sizeof(Element))
+// ---------------------------------------------------------------------------
+template <typename ScanImpl>
+void chunked_scan(Element* d_input, Element* d_output, int L)
+{
+    // Convenience wrapper: allocate scratch internally
+    Element* d_scratch;
+    cudaMalloc(&d_scratch, L * sizeof(Element));
+    chunked_scan_impl<ScanImpl>(d_input, d_output, L, d_scratch);
+    cudaFree(d_scratch);
+}
+
+template <typename ScanImpl>
+void chunked_scan(Element* d_input, Element* d_output, int L, Element* d_scratch)
+{
+    // Fast path: caller owns scratch, no allocation here
+    chunked_scan_impl<ScanImpl>(d_input, d_output, L, d_scratch);
 }
 
 #endif // CHUNKED_HIERARCHICAL_RECURSIVE_CUH

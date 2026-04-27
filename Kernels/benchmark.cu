@@ -102,29 +102,29 @@ static float median(float* arr, int n) {
 // ---------------------------------------------------------------------------
 
 // WarpShuffle
-static void run_warp_shuffle(Element* d_in, Element* d_out, int L) {
-    chunked_scan<WarpShuffle>(d_in, d_out, L);
+static void run_warp_shuffle(Element* d_in, Element* d_out, int L, Element* d_scratch) {
+    chunked_scan<WarpShuffle>(d_in, d_out, L, d_scratch);
 }
 
 // Blelloch
-static void run_blelloch(Element* d_in, Element* d_out, int L) {
-    chunked_scan<Blelloch>(d_in, d_out, L);
+static void run_blelloch(Element* d_in, Element* d_out, int L, Element* d_scratch) {
+    chunked_scan<Blelloch>(d_in, d_out, L, d_scratch);
 }
 
 // HillisSteele
-static void run_hillis_steele(Element* d_in, Element* d_out, int L) {
-    chunked_scan<HillisSteele>(d_in, d_out, L);
+static void run_hillis_steele(Element* d_in, Element* d_out, int L, Element* d_scratch) {
+    chunked_scan<HillisSteele>(d_in, d_out, L, d_scratch);
 }
 
 // ---------------------------------------------------------------------------
 // Benchmark one kernel at one (L, D) config
 // Returns median kernel time in ms, -1 if correctness fails
 // ---------------------------------------------------------------------------
-typedef void (*KernelFn)(Element*, Element*, int);
+typedef void (*KernelFn)(Element*, Element*, int, Element*);
 
 static float benchmark_kernel(
     KernelFn fn,
-    Element* d_in, Element* d_out,
+    Element* d_in, Element* d_out, Element* d_scratch,
     const Element* h_in,
     const float* ref,
     int L,
@@ -137,7 +137,7 @@ static float benchmark_kernel(
     // Warmup
     for (int i = 0; i < N_WARMUP; i++) {
         cudaMemcpy(d_in, h_in, L * sizeof(Element), cudaMemcpyHostToDevice);
-        fn(d_in, d_out, L);
+        fn(d_in, d_out, L, d_scratch);
     }
     cudaDeviceSynchronize();
 
@@ -151,7 +151,7 @@ static float benchmark_kernel(
     for (int r = 0; r < N_REPEAT; r++) {
         cudaMemcpy(d_in, h_in, L * sizeof(Element), cudaMemcpyHostToDevice);
         cudaEventRecord(start);
-        fn(d_in, d_out, L);
+        fn(d_in, d_out, L, d_scratch);
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
         times[r] = time_kernel_ms(start, stop);
@@ -220,15 +220,17 @@ int main(int argc, char* argv[]) {
                 h_in[t].b[d] = b[t * D + d];
             }
 
-        // Allocate device buffers
-        Element *d_in, *d_out;
-        cudaMalloc(&d_in,  L * sizeof(Element));
-        cudaMalloc(&d_out, L * sizeof(Element));
+        // Allocate device buffers + scratch (pre-allocated outside timed region
+        // so cudaMalloc cost is not included in kernel timing)
+        Element *d_in, *d_out, *d_scratch;
+        cudaMalloc(&d_in,     L * sizeof(Element));
+        cudaMalloc(&d_out,    L * sizeof(Element));
+        cudaMalloc(&d_scratch, L * sizeof(Element));  // covers all recursion levels
 
         for (int ki = 0; ki < N_KERNELS; ki++) {
             bool correct = false;
             float ms = benchmark_kernel(
-                kernels[ki].fn, d_in, d_out,
+                kernels[ki].fn, d_in, d_out, d_scratch,
                 h_in.data(), ref.data(), L, &correct);
 
             // Throughput: read a,b + write x = 3 * L * D * 4 bytes
@@ -247,6 +249,7 @@ int main(int argc, char* argv[]) {
 
         cudaFree(d_in);
         cudaFree(d_out);
+        cudaFree(d_scratch);
         printf("\n");
     }
 
