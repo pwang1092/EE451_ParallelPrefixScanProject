@@ -4,36 +4,36 @@ SSM Prefix Scan Benchmark  D=256  CHUNK_SIZE=32
 
 kernel           L        time_ms      GB/s         correct 
 ------------------------------------------------------------
-warp_shuffle     1024     2.903        1.08         PASS    
-blelloch         1024     3.427        0.92         PASS    
-hillis_steele    1024     1.317        2.39         PASS    
+warp_shuffle     1024     2.688        1.17         PASS    
+blelloch         1024     3.150        1.00         PASS    
+hillis_steele    1024     1.412        2.23         PASS    
 
-warp_shuffle     2048     4.166        1.51         PASS    
-blelloch         2048     3.775        1.67         PASS    
-hillis_steele    2048     1.978        3.18         PASS    
+warp_shuffle     2048     4.157        1.51         PASS    
+blelloch         2048     3.756        1.68         PASS    
+hillis_steele    2048     1.985        3.17         PASS    
 
-warp_shuffle     4096     5.071        2.48         PASS    
-blelloch         4096     5.505        2.29         PASS    
-hillis_steele    4096     3.133        4.02         PASS    
+warp_shuffle     4096     5.081        2.48         PASS    
+blelloch         4096     5.500        2.29         PASS    
+hillis_steele    4096     3.146        4.00         PASS    
 
-warp_shuffle     8192     6.967        3.61         PASS    
-blelloch         8192     8.011        3.14         PASS    
-hillis_steele    8192     4.157        6.05         PASS    
+warp_shuffle     8192     6.950        3.62         PASS    
+blelloch         8192     8.031        3.13         PASS    
+hillis_steele    8192     4.147        6.07         PASS    
 
-warp_shuffle     16384    10.510       4.79         PASS    
-blelloch         16384    12.536       4.01         PASS    
-hillis_steele    16384    6.555        7.68         PASS    
+warp_shuffle     16384    10.544       4.77         PASS    
+blelloch         16384    12.609       3.99         PASS    
+hillis_steele    16384    6.451        7.80         PASS    
 
-warp_shuffle     32768    17.550       5.74         PASS    
-blelloch         32768    21.784       4.62         PASS    
-hillis_steele    32768    11.494       8.76         PASS    
+warp_shuffle     32768    17.488       5.76         PASS    
+blelloch         32768    21.741       4.63         PASS    
+hillis_steele    32768    11.818       8.52         PASS    
 
-warp_shuffle     65536    33.486       6.01         PASS    
-blelloch         65536    40.964       4.91         PASS    
-hillis_steele    65536    22.053       9.13         PASS    
+warp_shuffle     65536    33.343       6.04         PASS    
+blelloch         65536    40.838       4.93         PASS    
+hillis_steele    65536    22.018       9.14         PASS    
 
-warp_shuffle     131072   62.852       6.41         PASS    
-blelloch         131072   79.158       5.09         PASS    
-hillis_steele    131072   43.273       9.30         PASS    
+warp_shuffle     131072   62.777       6.41         PASS    
+blelloch         131072   79.224       5.08         PASS    
+hillis_steele    131072   42.756       9.42         PASS    
 
 Results saved to Results/benchmark_D256.csv
