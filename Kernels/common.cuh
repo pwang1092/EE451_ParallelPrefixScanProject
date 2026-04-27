@@ -1,74 +1,36 @@
 #ifndef COMMON_CUH
 #define COMMON_CUH
 
-#ifndef D
-#define D 16  // SSM hidden state dimension — compile with -DD=64, -DD=256, etc.
-#endif
+// ---------------------------------------------------------------------------
+// D is now a RUNTIME parameter — no -DD= compile flag needed.
+// A single binary handles any hidden-state dimension.
+//
+// Why this is possible with the scalar design:
+//   D is just a grid dimension (blockIdx.y).  The kernels never loop over D,
+//   never store D floats per thread, and shared memory is fixed at 16 KB
+//   regardless of D.  So D can be passed as a plain int at launch time.
+// ---------------------------------------------------------------------------
 
-#define BLOCK_SIZE 256
+// ---------------------------------------------------------------------------
+// CHUNK_SIZE: timesteps processed per block, per dimension.
+// Fixed at 1024 regardless of D — shared memory cost is always 16 KB/block.
+// ---------------------------------------------------------------------------
+#define CHUNK_SIZE 1024
 
-struct Element {
-    float a[D];
-    float b[D];
-};
+// ---------------------------------------------------------------------------
+// Data layout: dimension-major, two separate float arrays.
+//   a_ptr[d * L + t]   b_ptr[d * L + t]    for d in [0,D), t in [0,L)
+//
+// Threads in a warp all share the same d (blockIdx.y) and hold consecutive
+// t values (threadIdx.x) → perfectly coalesced HBM access.
+// ---------------------------------------------------------------------------
 
-__device__ inline Element identity() {
-    Element e;
-    for (int d = 0; d < D; d++) {
-        e.a[d] = 1.0f;   // diagonal of identity matrix = 1
-        e.b[d] = 0.0f;
-    }
-    return e;
-}
-
-__device__ inline Element combine(Element left, Element right) {
-    Element result;
-    for (int d = 0; d < D; d++) {
-        result.a[d] = right.a[d] * left.a[d];
-        result.b[d] = right.a[d] * left.b[d] + right.b[d];
-    }
-    return result;
-}
-
-/*
-// Identity element: A = I (identity matrix), b = 0
-__device__ inline Element identity() {
-    Element e;
-    for (int i = 0; i < D; i++) {
-        for (int j = 0; j < D; j++) {
-            e.A[i][j] = (i == j) ? 1.0f : 0.0f;
-        }
-        e.b[i] = 0.0f;
-    }
-    return e;
-}
-
-// Associative combine: (A2, b2) ⊕ (A1, b1) = (A2·A1, A2·b1 + b2)
-__device__ inline Element combine(Element left, Element right) {
-    Element result;
-
-    // result.A = right.A * left.A
-    for (int i = 0; i < D; i++) {
-        for (int j = 0; j < D; j++) {
-            float sum = 0.0f;
-            for (int k = 0; k < D; k++) {
-                sum += right.A[i][k] * left.A[k][j];
-            }
-            result.A[i][j] = sum;
-        }
-    }
-
-    // result.b = right.A * left.b + right.b
-    for (int i = 0; i < D; i++) {
-        float sum = 0.0f;
-        for (int k = 0; k < D; k++) {
-            sum += right.A[i][k] * left.b[k];
-        }
-        result.b[i] = sum + right.b[i];
-    }
-
-    return result;
-}
-*/
+// Shared-memory layout (4 * CHUNK_SIZE floats = 16 KB, same for every D):
+//   shmem[0            .. CHUNK_SIZE)   -> s_a   (primary a-values)
+//   shmem[CHUNK_SIZE   .. 2*CHUNK_SIZE) -> s_b   (primary b-values)
+//   shmem[2*CHUNK_SIZE .. 3*CHUNK_SIZE) -> aux_a (HillisSteele double-buffer)
+//   shmem[3*CHUNK_SIZE .. 4*CHUNK_SIZE) -> aux_b (HillisSteele double-buffer)
+#define SHMEM_FLOATS  (4 * CHUNK_SIZE)
+#define SHMEM_BYTES   (SHMEM_FLOATS * sizeof(float))
 
 #endif // COMMON_CUH

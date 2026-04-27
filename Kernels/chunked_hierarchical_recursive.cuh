@@ -2,206 +2,183 @@
 #define CHUNKED_HIERARCHICAL_RECURSIVE_CUH
 
 #include "common.cuh"
-#include "hillis_steele.cuh"
-#include "blelloch.cuh"
-#include "warp_shuffle.cuh"
+#include "hillis_steele.cu"
+#include "blelloch.cu"
+#include "warp_shuffle.cu"
 
 // ---------------------------------------------------------------------------
-// CHUNK_SIZE: minimum BLOCK_SIZE across all three kernels for given D.
-//   D=16:  min(512, 512, 512) = 512
-//   D=64:  min(256, 128, 128) = 128
-//   D=256: min(64,  32,  32)  = 32
-//   D=512: min(32,  16,  16)  = 16
+// D is a RUNTIME int passed to chunked_scan / chunked_scan_impl.
+// It is used only as a grid dimension and in index arithmetic — never inside
+// any kernel body as a loop bound or array size.  This is why a single
+// compiled binary can benchmark any hidden-state dimension.
 // ---------------------------------------------------------------------------
-#ifdef CHUNK_SIZE
-#undef CHUNK_SIZE
-#endif
-
-#if D <= 16
-#define CHUNK_SIZE 512
-#elif D <= 64
-#define CHUNK_SIZE 128
-#elif D <= 256
-#define CHUNK_SIZE 32
-#else
-#define CHUNK_SIZE 16
-#endif
 
 // ---------------------------------------------------------------------------
-// shmem_elements<ScanImpl>: returns how many Element slots the kernel needs.
-// HillisSteele needs 2*CHUNK_SIZE (double-buffer).
-// Blelloch needs conflict-free padding because it accesses shared_data[phys(i)].
+// Phase 1: local scan per chunk × per dimension.
+//   Grid(num_chunks, D_rt),  Block(CHUNK_SIZE)
+//   blockIdx.y = d  (runtime dimension index)
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
-constexpr size_t shmem_elements() { return CHUNK_SIZE; }
-
-template <>
-constexpr size_t shmem_elements<HillisSteele>() { return 2 * CHUNK_SIZE; }
-
-constexpr size_t blelloch_padding(size_t i) {
-    return (i >> 5) + (i >> 10);
-}
-
-template <>
-constexpr size_t shmem_elements<Blelloch>() {
-    return CHUNK_SIZE + blelloch_padding(CHUNK_SIZE - 1);
-}
-
-// ---------------------------------------------------------------------------
-// Phase 1: each block scans its own chunk independently.
-// ---------------------------------------------------------------------------
-template <typename ScanImpl>
-__global__ void phase1_local_scan(
-    const Element* __restrict__ input,
-          Element* __restrict__ output,
-          Element* __restrict__ block_totals,
-    int L)
+__global__ void phase1_scan(
+    const float* __restrict__ a_in,
+    const float* __restrict__ b_in,
+          float* __restrict__ a_out,
+          float* __restrict__ b_out,
+          float* __restrict__ tot_a,   // [D_rt * num_chunks]
+          float* __restrict__ tot_b,
+    int L, int num_chunks)
 {
-    extern __shared__ Element shared_data[];
+    extern __shared__ float shmem[];
 
-    int block_start = blockIdx.x * CHUNK_SIZE;
-    int tid         = threadIdx.x;
-    int global_idx  = block_start + tid;
+    const int d   = blockIdx.y;
+    const int cid = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int t   = cid * CHUNK_SIZE + tid;
 
-    shared_data[tid] = (global_idx < L) ? input[global_idx] : identity();
+    shmem[tid]              = (t < L) ? a_in[d * L + t] : 1.0f;
+    shmem[CHUNK_SIZE + tid] = (t < L) ? b_in[d * L + t] : 0.0f;
     __syncthreads();
 
-    __shared__ Element s_total;
-    ScanImpl::block_scan(shared_data, CHUNK_SIZE, &s_total);
-    __syncthreads();
+    __shared__ float s_tot_a, s_tot_b;
+    ScanImpl::block_scan(shmem, CHUNK_SIZE, &s_tot_a, &s_tot_b);
 
-    if (global_idx < L)
-        output[global_idx] = shared_data[tid];
-
-    if (tid == 0)
-        block_totals[blockIdx.x] = s_total;
+    if (t < L) {
+        a_out[d * L + t] = shmem[tid];
+        b_out[d * L + t] = shmem[CHUNK_SIZE + tid];
+    }
+    if (tid == 0) {
+        tot_a[d * num_chunks + cid] = s_tot_a;
+        tot_b[d * num_chunks + cid] = s_tot_b;
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2 (single-block): scan block totals when they fit in one block.
+// Phase 2 (single-block): scan block totals when num_chunks <= CHUNK_SIZE.
+//   Grid(D_rt, 1),  Block(CHUNK_SIZE)
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
 __global__ void phase2_scan_totals(
-    Element* __restrict__ block_totals,
-    int num_blocks)
+    float* __restrict__ tot_a,
+    float* __restrict__ tot_b,
+    int num_chunks)
 {
-    extern __shared__ Element shared_data[];
+    extern __shared__ float shmem[];
 
-    int tid = threadIdx.x;
-    shared_data[tid] = (tid < num_blocks) ? block_totals[tid] : identity();
+    const int d   = blockIdx.x;
+    const int tid = threadIdx.x;
+
+    shmem[tid]              = (tid < num_chunks) ? tot_a[d * num_chunks + tid] : 1.0f;
+    shmem[CHUNK_SIZE + tid] = (tid < num_chunks) ? tot_b[d * num_chunks + tid] : 0.0f;
     __syncthreads();
 
-    Element total;
-    ScanImpl::block_scan(shared_data, num_blocks, &total);
-    __syncthreads();
+    __shared__ float s_tot_a, s_tot_b;
+    ScanImpl::block_scan(shmem, num_chunks, &s_tot_a, &s_tot_b);
 
-    if (tid < num_blocks)
-        block_totals[tid] = shared_data[tid];
+    if (tid < num_chunks) {
+        tot_a[d * num_chunks + tid] = shmem[tid];
+        tot_b[d * num_chunks + tid] = shmem[CHUNK_SIZE + tid];
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3: add preceding block's scanned total into each element.
+// Phase 3: propagate scanned totals into each chunk's elements.
+//   Grid(num_chunks, D_rt),  Block(CHUNK_SIZE)
 // ---------------------------------------------------------------------------
 __global__ void phase3_propagate(
-          Element* __restrict__ output,
-    const Element* __restrict__ block_totals,
-    int L)
+          float* __restrict__ a_out,
+          float* __restrict__ b_out,
+    const float* __restrict__ tot_a,
+    const float* __restrict__ tot_b,
+    int L, int num_chunks)
 {
-    if (blockIdx.x == 0) return;
+    const int d   = blockIdx.y;
+    const int cid = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int t   = cid * CHUNK_SIZE + tid;
 
-    int global_idx = blockIdx.x * CHUNK_SIZE + threadIdx.x;
-    if (global_idx >= L) return;
+    if (cid == 0 || t >= L) return;
 
-    output[global_idx] = combine(block_totals[blockIdx.x - 1], output[global_idx]);
+    float pa = tot_a[d * num_chunks + cid - 1];
+    float pb = tot_b[d * num_chunks + cid - 1];
+    float xa = a_out[d * L + t];
+    float xb = b_out[d * L + t];
+
+    // combine(left=(pa,pb), right=(xa,xb))
+    a_out[d * L + t] = xa * pa;
+    b_out[d * L + t] = xa * pb + xb;
 }
 
 // ---------------------------------------------------------------------------
-// chunked_scan_impl — internal recursive implementation using a pre-allocated
-// scratch buffer. The scratch pointer is advanced at each recursion level so
-// no cudaMalloc/cudaFree ever happens inside the timed region.
-//
-// Scratch layout (all levels combined, sizes in Elements):
-//   Level 1: num_blocks      = L / CHUNK_SIZE
-//   Level 2: num_blocks²     = L / CHUNK_SIZE²
-//   ...
-//   Total:   < L / (CHUNK_SIZE - 1)  << L
-//
-// So a scratch buffer of L Elements (allocated once by caller) covers all
-// levels with room to spare even at CHUNK_SIZE=16.
+// chunked_scan_impl — internal recursive driver.
+//   D_rt : runtime hidden-state dimension
+//   d_scratch : pre-allocated, >= 2 * D_rt * L floats
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
 void chunked_scan_impl(
-    Element* d_input,
-    Element* d_output,
-    int L,
-    Element* d_scratch)   // pre-allocated, must hold at least num_blocks Elements
+    float* d_a_in,  float* d_b_in,
+    float* d_a_out, float* d_b_out,
+    int L, int D_rt,
+    float* d_scratch)
 {
     if (L <= 0) return;
 
-    int num_blocks = (L + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    size_t shmem = shmem_elements<ScanImpl>() * sizeof(Element);
+    const int num_chunks = (L + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-    // Carve block_totals from the front of scratch; advance scratch pointer
-    // for the next recursion level.
-    Element* d_block_totals  = d_scratch;
-    Element* d_scratch_next  = d_scratch + num_blocks;  // next level uses remainder
+    float* tot_a        = d_scratch;
+    float* tot_b        = d_scratch + (size_t)D_rt * num_chunks;
+    float* next_scratch = d_scratch + (size_t)D_rt * num_chunks * 2;
 
-    // Phase 1
-    cudaFuncSetAttribute(phase1_local_scan<ScanImpl>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
-    phase1_local_scan<ScanImpl><<<num_blocks, CHUNK_SIZE, shmem>>>(
-        d_input, d_output, d_block_totals, L);
+    dim3 grid1(num_chunks, D_rt);
+    phase1_scan<ScanImpl><<<grid1, CHUNK_SIZE, SHMEM_BYTES>>>(
+        d_a_in, d_b_in, d_a_out, d_b_out, tot_a, tot_b, L, num_chunks);
 
-    // Phase 2 — recurse if num_blocks > CHUNK_SIZE
-    if (num_blocks <= CHUNK_SIZE) {
-        cudaFuncSetAttribute(phase2_scan_totals<ScanImpl>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
-        phase2_scan_totals<ScanImpl><<<1, CHUNK_SIZE, shmem>>>(
-            d_block_totals, num_blocks);
+    if (num_chunks <= CHUNK_SIZE) {
+        phase2_scan_totals<ScanImpl><<<D_rt, CHUNK_SIZE, SHMEM_BYTES>>>(
+            tot_a, tot_b, num_chunks);
     } else {
-        // Scan block_totals in-place using a temporary output buffer carved
-        // from scratch. After the recursive call, d_scratch_next holds the
-        // scanned totals; copy back to d_block_totals.
-        Element* d_scanned_totals = d_scratch_next + num_blocks;
+        // Recursive case (only for L > CHUNK_SIZE^2 = 1,048,576)
+        float* tmp_a        = next_scratch;
+        float* tmp_b        = next_scratch + (size_t)D_rt * num_chunks;
+        float* deep_scratch = next_scratch + (size_t)D_rt * num_chunks * 2;
         chunked_scan_impl<ScanImpl>(
-            d_block_totals, d_scanned_totals, num_blocks, d_scratch_next);
-        cudaMemcpy(d_block_totals, d_scanned_totals,
-                   num_blocks * sizeof(Element), cudaMemcpyDeviceToDevice);
+            tot_a, tot_b, tmp_a, tmp_b, num_chunks, D_rt, deep_scratch);
+        cudaMemcpy(tot_a, tmp_a, (size_t)D_rt * num_chunks * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(tot_b, tmp_b, (size_t)D_rt * num_chunks * sizeof(float), cudaMemcpyDeviceToDevice);
     }
 
-    // Phase 3
-    phase3_propagate<<<num_blocks, CHUNK_SIZE>>>(d_output, d_block_totals, L);
+    dim3 grid3(num_chunks, D_rt);
+    phase3_propagate<<<grid3, CHUNK_SIZE>>>(
+        d_a_out, d_b_out, tot_a, tot_b, L, num_chunks);
 }
 
 // ---------------------------------------------------------------------------
-// chunked_scan — public interface.
+// Public interface — D is now a runtime int argument.
 //
-// Two variants:
+//   chunked_scan<Impl>(a_in, b_in, a_out, b_out, L, D)
+//     Allocates scratch internally (convenient, not for benchmarking).
 //
-//   chunked_scan<ScanImpl>(d_in, d_out, L)
-//     Allocates scratch internally. Convenient but includes cudaMalloc cost.
-//     Use for correctness testing or one-off calls.
-//
-//   chunked_scan<ScanImpl>(d_in, d_out, L, d_scratch)
-//     Uses caller-provided scratch buffer (>= L Elements).
-//     No allocation inside — suitable for benchmarking.
-//     Pre-allocate once with: cudaMalloc(&d_scratch, L * sizeof(Element))
+//   chunked_scan<Impl>(a_in, b_in, a_out, b_out, L, D, d_scratch)
+//     Caller provides scratch (>= 2 * D * L floats).  No allocation inside
+//     the timed region.
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
-void chunked_scan(Element* d_input, Element* d_output, int L)
+void chunked_scan(float* d_a_in, float* d_b_in,
+                  float* d_a_out, float* d_b_out,
+                  int L, int D_rt)
 {
-    // Convenience wrapper: allocate scratch internally
-    Element* d_scratch;
-    cudaMalloc(&d_scratch, L * sizeof(Element));
-    chunked_scan_impl<ScanImpl>(d_input, d_output, L, d_scratch);
+    float* d_scratch;
+    cudaMalloc(&d_scratch, 2ULL * D_rt * L * sizeof(float));
+    chunked_scan_impl<ScanImpl>(d_a_in, d_b_in, d_a_out, d_b_out, L, D_rt, d_scratch);
     cudaFree(d_scratch);
 }
 
 template <typename ScanImpl>
-void chunked_scan(Element* d_input, Element* d_output, int L, Element* d_scratch)
+void chunked_scan(float* d_a_in, float* d_b_in,
+                  float* d_a_out, float* d_b_out,
+                  int L, int D_rt,
+                  float* d_scratch)
 {
-    // Fast path: caller owns scratch, no allocation here
-    chunked_scan_impl<ScanImpl>(d_input, d_output, L, d_scratch);
+    chunked_scan_impl<ScanImpl>(d_a_in, d_b_in, d_a_out, d_b_out, L, D_rt, d_scratch);
 }
 
 #endif // CHUNKED_HIERARCHICAL_RECURSIVE_CUH

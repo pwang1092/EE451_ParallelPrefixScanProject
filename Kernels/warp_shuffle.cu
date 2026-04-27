@@ -1,115 +1,113 @@
 /**
- * warp_shuffle.cu — Warp-shuffle inclusive prefix scan for SSM recurrence.
+ * warp_shuffle.cu  —  Warp-shuffle inclusive prefix scan (scalar edition)
  *
- * Implements WarpShuffle::block_scan per the common.cuh interface.
+ * Each thread holds exactly 2 floats (va, vb) in registers — no D-loop,
+ * no bank conflicts, no register spilling.
  *
- * Algorithm overview:
- *   1. Each thread holds one Element (one timestep's (a, b) pair).
- *   2. Within each warp (32 threads), run an inclusive scan using __shfl_up_sync
- *      in log2(32) = 5 steps — no shared memory, no bank conflicts.
- *   3. The last active thread in each warp writes its partial total to shared memory.
- *   4. Thread 0..num_warps-1 (first warp) scans the warp totals.
- *   5. Each thread adds the preceding warp's total to its own value.
+ * OLD cost at D=512:  shfl_up_element shuffled 2*512=1024 floats per step
+ *                     × 5 steps = 5120 __shfl_up_sync calls per warp scan.
+ * NEW cost:           2 __shfl_up_sync calls per step × 5 steps = 10 total.
  *
- * Why warp shuffle?
- *   __shfl_up_sync exchanges registers directly between threads in the same warp.
- *   No shared memory round-trip means no bank conflicts and lower latency than
- *   Blelloch or Hillis-Steele for small-to-medium D where register pressure is ok.
- *   At large D (512), each Element is 2*D*4 = 4KB of registers, which limits
- *   occupancy — this is one of the hypotheses we test in the benchmark.
+ * Algorithm (three phases):
+ *  1. Each warp runs an inclusive scan on its own 32 elements (5 shuffle steps).
+ *  2. The first warp scans the 32 per-warp totals (another 5 shuffle steps).
+ *  3. Each thread adds its warp's preceding prefix to its own value.
+ *
+ * Shared memory:
+ *   s_a = shmem[0 .. CHUNK_SIZE)       read once on entry, written on exit
+ *   s_b = shmem[CHUNK_SIZE .. 2*CS)
+ *   wt_a[CHUNK_SIZE/32], wt_b[CHUNK_SIZE/32] — small static arrays for warp totals
+ *
+ * CHUNK_SIZE=1024 → 32 warps, both static arrays fit in 256 bytes total.
  */
 
-#include "common.cuh"        // Element, combine, identity — must come first
-#include "warp_shuffle.cuh"  // undef + redefines BLOCK_SIZE to D-scaled value
+#include "common.cuh"
 
-// ---------------------------------------------------------------------------
-// Shuffle a full Element up by `delta` lanes within the warp.
-// We must call __shfl_up_sync once per float since it only moves 32 bits.
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ Element shfl_up_element(Element val, int delta, unsigned mask = 0xffffffffu) {
-    Element result;
-    #pragma unroll
-    for (int d = 0; d < D; d++) {
-        result.a[d] = __shfl_up_sync(mask, val.a[d], delta);
-        result.b[d] = __shfl_up_sync(mask, val.b[d], delta);
-    }
-    return result;
-}
-
-// ---------------------------------------------------------------------------
-// Inclusive warp scan. Each thread ends up with the prefix from lane 0 to
-// its own lane. Threads with lane < offset keep their own value unchanged.
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ Element warp_inclusive_scan(Element val) {
-    const int lane = threadIdx.x & 31;
-    #pragma unroll
-    for (int offset = 1; offset < 32; offset <<= 1) {
-        Element left = shfl_up_element(val, offset);
-        if (lane >= offset)
-            val = combine(left, val);
-    }
-    return val;
-}
-
-// ---------------------------------------------------------------------------
-// WarpShuffle::block_scan
-//   shared_data : in shared memory, length n, modified in-place
-//   n           : number of active elements (<= blockDim.x)
-//   block_total : set to the combined value of all n elements
-//
-// Assumes one thread per element: tid = threadIdx.x handles shared_data[tid].
-// blockDim.x must be a multiple of 32 (pad with identity if n < blockDim.x).
-// ---------------------------------------------------------------------------
 struct WarpShuffle {
     static __device__ void block_scan(
-        Element* shared_data,
-        int n,
-        Element* block_total)
+        float* __restrict__ shmem, int n,
+        float* s_tot_a, float* s_tot_b)
     {
-        const int tid     = threadIdx.x;
-        const int lane    = tid & 31;
-        const int warp_id = tid >> 5;
-        const int num_warps = (blockDim.x + 31) >> 5;
+        float* s_a = shmem;
+        float* s_b = shmem + CHUNK_SIZE;
 
-        // Shared storage for per-warp totals.
-        // Sized to BLOCK_SIZE/32 + 1 to match the D-scaled BLOCK_SIZE
-        // (e.g. D=512 gives BLOCK_SIZE=16, only 1 warp, so 2 slots needed)
-        __shared__ Element warp_totals[BLOCK_SIZE / 32 + 1];
+        // Small static arrays for inter-warp totals.
+        // CHUNK_SIZE/32 = 32 slots — 256 bytes total, negligible.
+        __shared__ float wt_a[CHUNK_SIZE / 32];
+        __shared__ float wt_b[CHUNK_SIZE / 32];
 
-        // Step 1: load element (identity for out-of-range threads)
-        Element val = (tid < n) ? shared_data[tid] : identity();
+        const int tid  = threadIdx.x;
+        const int lane = tid & 31;
+        const int wid  = tid >> 5;
+        const int nw   = (n + 31) >> 5;   // number of warps that cover n elements
 
-        // Step 2: warp-level inclusive scan via shuffle
-        val = warp_inclusive_scan(val);
+        // ----------------------------------------------------------------
+        // Step 1: load into registers (identity for tid >= n)
+        // ----------------------------------------------------------------
+        float va = (tid < n) ? s_a[tid] : 1.0f;
+        float vb = (tid < n) ? s_b[tid] : 0.0f;
 
+        // ----------------------------------------------------------------
+        // Step 2: warp-level inclusive scan — 5 steps, all in registers
+        // ----------------------------------------------------------------
+        #pragma unroll
+        for (int off = 1; off < 32; off <<= 1) {
+            float la = __shfl_up_sync(0xffffffffu, va, off);
+            float lb = __shfl_up_sync(0xffffffffu, vb, off);
+            if (lane >= off) {
+                // combine(left=(la,lb), right=(va,vb))
+                vb = va * lb + vb;
+                va = va * la;
+            }
+        }
+
+        // ----------------------------------------------------------------
         // Step 3: last active lane in each warp saves its total
-        // "Last active" = min(lane 31, last thread in block that is < n)
-        bool is_last_in_warp = (lane == 31) || (tid == n - 1);
-        if (is_last_in_warp)
-            warp_totals[warp_id] = val;
-        __syncthreads();
-
-        // Step 4: first warp scans the warp totals
-        if (warp_id == 0) {
-            Element wt = (tid < num_warps) ? warp_totals[tid] : identity();
-            wt = warp_inclusive_scan(wt);
-            if (tid < num_warps)
-                warp_totals[tid] = wt;
+        // ----------------------------------------------------------------
+        bool last_in_warp = (wid < nw) && ((lane == 31) || (tid == n - 1));
+        if (last_in_warp) {
+            wt_a[wid] = va;
+            wt_b[wid] = vb;
         }
         __syncthreads();
 
-        // Step 5: add preceding warp's total to every thread
-        if (warp_id > 0)
-            val = combine(warp_totals[warp_id - 1], val);
+        // ----------------------------------------------------------------
+        // Step 4: first warp scans the warp totals
+        // nw <= 32, so the first warp can handle all totals in one pass.
+        // ----------------------------------------------------------------
+        if (wid == 0) {
+            float wa = (tid < nw) ? wt_a[tid] : 1.0f;
+            float wb = (tid < nw) ? wt_b[tid] : 0.0f;
+            #pragma unroll
+            for (int off = 1; off < 32; off <<= 1) {
+                float la = __shfl_up_sync(0xffffffffu, wa, off);
+                float lb = __shfl_up_sync(0xffffffffu, wb, off);
+                if (lane >= off) {
+                    wb = wa * lb + wb;
+                    wa = wa * la;
+                }
+            }
+            if (tid < nw) { wt_a[tid] = wa; wt_b[tid] = wb; }
+        }
+        __syncthreads();
 
-        // Write back
-        if (tid < n)
-            shared_data[tid] = val;
+        // ----------------------------------------------------------------
+        // Step 5: each warp adds the inclusive prefix of all preceding warps
+        // ----------------------------------------------------------------
+        if (wid > 0) {
+            float pa = wt_a[wid - 1], pb = wt_b[wid - 1];
+            // combine(left=(pa,pb), right=(va,vb))
+            float new_va = va * pa;
+            float new_vb = va * pb + vb;
+            va = new_va;
+            vb = new_vb;
+        }
 
-        // block_total = combined value of all n elements (last active element)
-        if (tid == n - 1)
-            *block_total = val;
-
+        // ----------------------------------------------------------------
+        // Write back to shared memory; broadcast block total
+        // ----------------------------------------------------------------
+        if (tid < n) { s_a[tid] = va; s_b[tid] = vb; }
+        if (tid == n - 1) { *s_tot_a = va; *s_tot_b = vb; }
         __syncthreads();
     }
 };

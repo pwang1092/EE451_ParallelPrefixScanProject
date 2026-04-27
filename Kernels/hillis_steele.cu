@@ -1,68 +1,80 @@
 /**
- * hillis_steele.cu — Hillis-Steele step-optimal parallel prefix scan
+ * hillis_steele.cu  —  Hillis-Steele inclusive prefix scan (scalar edition)
  *
- * Implements HillisSteele::block_scan per the common.cuh interface.
+ * Each thread handles ONE float pair (a_val, b_val) for one (timestep, dim)
+ * coordinate.  No D-loop anywhere.
  *
- * Algorithm overview:
- *   Hillis-Steele is a step-optimal (ceil(log2 n) steps) but work-inefficient
- *   (O(n log n) combine operations) inclusive scan.
+ * Algorithm: ceil(log2 n) steps.  In each step s:
+ *   out[i] = (i >= s) ? combine(in[i-s], in[i]) : in[i]
+ * Requires double-buffering because reading in[i-s] and writing out[i] may
+ * overlap across threads within the same step.
  *
- *   For step s = 1, 2, 4, ...,:
- *     Each thread i computes:
- *       out[i] = (i >= s) ? combine(in[i - s], in[i]) : in[i]
- *     Then the in and out buffers are swapped for the next step.
+ * Shared memory layout (passed by phase1 / phase2):
+ *   shmem[0              .. CHUNK_SIZE) = s_a   (active buffer for a, starts here)
+ *   shmem[CHUNK_SIZE     .. 2*CHUNK_SIZE) = s_b  (active buffer for b)
+ *   shmem[2*CHUNK_SIZE   .. 3*CHUNK_SIZE) = aux_a (ping-pong buffer)
+ *   shmem[3*CHUNK_SIZE   .. 4*CHUNK_SIZE) = aux_b
  *
- *   Double-buffering in shared memory is required because thread i reads
- *   position i-s which is owned by a different thread. Without a separate
- *   output buffer, a thread writing its result could corrupt another thread's
- *   unread input within the same step.
- *
- * Shared memory layout (dynamic, allocated by caller):
- *   The caller allocates 2 * CHUNK_SIZE * sizeof(Element) and passes a pointer
- *   to the first half as shared_data. block_scan uses shared_data[CHUNK_SIZE..]
- *   as buf_B (second buffer) via pointer arithmetic — no static declaration.
- *   This avoids the ptxas compile-time shared memory limit check.
+ * After block_scan returns, results are always in s_a / s_b (shmem[0..n) and
+ * shmem[CHUNK_SIZE..CHUNK_SIZE+n)).
  */
 
-#include "common.cuh"           // Element, combine, identity — must come first
-#include "hillis_steele.cuh"    // undef + redefines BLOCK_SIZE to D-scaled value
+#include "common.cuh"
 
 struct HillisSteele {
-    static __device__ void block_scan(Element* shared_data, int n, Element* block_total) {
-        // buf_B lives in the second half of the caller's dynamic shared allocation.
-        // Caller must allocate 2 * BLOCK_SIZE * sizeof(Element) and pass a pointer
-        // to the first half. This avoids a static __shared__ declaration which would
-        // fail ptxas compile-time checks when BLOCK_SIZE * sizeof(Element) > 48KB.
-        Element* buf_B = shared_data + BLOCK_SIZE;
+    // block_scan — called from phase1 and phase2 kernels.
+    //   shmem   : 4*CHUNK_SIZE floats (see layout above); pre-loaded by caller.
+    //   n       : number of valid elements (pad with identity beyond n).
+    //   s_tot_a / s_tot_b : __shared__ pointers; set to the combined total of
+    //             all n elements; readable by all threads after return.
+    static __device__ void block_scan(
+        float* __restrict__ shmem, int n,
+        float* s_tot_a, float* s_tot_b)
+    {
+        // Current and next (ping-pong) buffer pointers — stored in registers,
+        // same value in every thread so swapping is deterministic.
+        float* a_cur = shmem;
+        float* a_nxt = shmem + 2 * CHUNK_SIZE;   // aux_a
+        float* b_cur = shmem + CHUNK_SIZE;
+        float* b_nxt = shmem + 3 * CHUNK_SIZE;   // aux_b
 
-        int tid = threadIdx.x;
+        const int tid = threadIdx.x;
 
-        Element* in_buf  = shared_data;
-        Element* out_buf = buf_B;
-
+        // ceil(log2 n) steps
         for (int offset = 1; offset < n; offset <<= 1) {
             __syncthreads();
             if (tid < n) {
-                if (tid >= offset)
-                    out_buf[tid] = combine(in_buf[tid - offset], in_buf[tid]);
-                else
-                    out_buf[tid] = in_buf[tid];
+                if (tid >= offset) {
+                    float la = a_cur[tid - offset], lb = b_cur[tid - offset];
+                    float ra = a_cur[tid],           rb = b_cur[tid];
+                    // combine(left=(la,lb), right=(ra,rb))
+                    a_nxt[tid] = ra * la;
+                    b_nxt[tid] = ra * lb + rb;
+                } else {
+                    a_nxt[tid] = a_cur[tid];
+                    b_nxt[tid] = b_cur[tid];
+                }
             }
-            Element* tmp = in_buf;
-            in_buf  = out_buf;
-            out_buf = tmp;
+            // Swap pointers (all threads do this identically)
+            float* tmp;
+            tmp = a_cur; a_cur = a_nxt; a_nxt = tmp;
+            tmp = b_cur; b_cur = b_nxt; b_nxt = tmp;
         }
         __syncthreads();
 
-        // After ceil(log2 n) steps, final results are in in_buf.
-        // If steps was odd, in_buf == buf_B; copy back to shared_data
-        // so the caller always reads from shared_data.
-        if (in_buf != shared_data && tid < n)
-            shared_data[tid] = in_buf[tid];
+        // If an odd number of steps ran, result landed in aux_a/aux_b.
+        // Copy back to s_a/s_b so the caller always reads from a fixed location.
+        if (a_cur != shmem && tid < n) {
+            shmem[tid]              = a_cur[tid];
+            shmem[CHUNK_SIZE + tid] = b_cur[tid];
+        }
         __syncthreads();
 
-        if (tid == n - 1)
-            *block_total = shared_data[tid];
+        // Broadcast block total (last valid element) to caller via __shared__ ptr.
+        if (tid == n - 1) {
+            *s_tot_a = shmem[tid];
+            *s_tot_b = shmem[CHUNK_SIZE + tid];
+        }
         __syncthreads();
     }
 };

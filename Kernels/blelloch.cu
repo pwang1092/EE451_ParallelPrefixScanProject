@@ -1,99 +1,113 @@
 /**
- * blelloch.cu — Blelloch up-sweep + down-sweep algorithm for prefix scan
+ * blelloch.cu  —  Blelloch up-sweep / down-sweep prefix scan (scalar edition)
  *
- * Implements Blelloch::block_scan per the common.cuh interface.
+ * Each thread handles ONE float pair (a_val, b_val).  No D-loop.
  *
- * Thread count note:
- *   Blelloch uses n/2 threads to scan n elements (each thread handles ai and bi).
- *   phase1_local_scan launches CHUNK_SIZE threads but Blelloch only needs CHUNK_SIZE/2.
- *   Threads with bi >= n are "inactive" (have ai in valid range but bi out of range).
- *   All bi accesses are guarded with `active = (bi < n)` to prevent OOB reads/writes.
+ * Algorithm:
+ *  1. Up-sweep (reduce):   build a partial-sum tree in shared memory.
+ *  2. Set root to identity, save the total.
+ *  3. Down-sweep (distribute): push exclusive prefixes down the tree.
+ *  4. Convert exclusive → inclusive by combining each element with its original.
  *
- * Conflict-free addressing note:
- *   Data is stored at shared_data[phys(i)] internally to avoid bank conflicts.
- *   phase1 loads data to direct positions shared_data[tid], so we copy direct→phys
- *   at entry and phys→direct at exit to maintain a consistent external interface.
+ * Requirement: n must be a power of 2.  For phase1 n=CHUNK_SIZE=1024 ✓.
+ *   For phase2 n=num_chunks which is always a power of 2 for the benchmark's
+ *   L values (all powers of 2 and CHUNK_SIZE=1024).
+ *
+ * Shared memory layout (same as common.cuh):
+ *   s_a = shmem[0 .. CHUNK_SIZE)
+ *   s_b = shmem[CHUNK_SIZE .. 2*CHUNK_SIZE)
+ *   (aux_a / aux_b zones not used by Blelloch)
+ *
+ * NOTE: No conflict-free addressing is applied in this scalar rewrite.
+ *   The performance-limiting factor was the serial D-loop in combine(), not
+ *   bank conflicts.  Adding it back is a straightforward future optimization.
  */
 
-#include "common.cuh"       // Element, combine, identity — must come first
-#include "blelloch.cuh"     // undef + redefines BLOCK_SIZE to D-scaled value
-
-#define NUM_BANKS 32
-#define LOG_NUM_BANKS 5
-#define CONFLICT_FREE_OFFSET(i) ((i >> LOG_NUM_BANKS) + (i >> (2 * LOG_NUM_BANKS)))
-
-__device__ __forceinline__ int phys(int i) {
-    return i + CONFLICT_FREE_OFFSET(i);
-}
+#include "common.cuh"
 
 struct Blelloch {
-    static __device__ void block_scan(Element* shared_data, int n, Element* block_total) {
-        int tid = threadIdx.x;
+    static __device__ void block_scan(
+        float* __restrict__ shmem, int n,
+        float* s_tot_a, float* s_tot_b)
+    {
+        float* s_a = shmem;
+        float* s_b = shmem + CHUNK_SIZE;
+
+        const int tid = threadIdx.x;
+
+        // Save originals so we can convert exclusive→inclusive at the end.
+        float orig_a = (tid < n) ? s_a[tid] : 1.0f;
+        float orig_b = (tid < n) ? s_b[tid] : 0.0f;
+        __syncthreads();
+
+        // ----------------------------------------------------------------
+        // Up-sweep (reduce phase)
+        // After this loop, s_a[n-1] / s_b[n-1] hold the total of all elements.
+        // ----------------------------------------------------------------
         int offset = 1;
-
-        int ai = tid;
-        int bi = tid + (n >> 1);
-        bool active = (bi < n);  // threads 0..n/2-1 are active; rest have bi out of range
-
-        // Copy from direct positions (loaded by caller) to conflict-free (phys) positions.
-        // Inactive threads (bi >= n) only write ai position — bi is guarded.
-        Element val_a = shared_data[ai];
-        Element val_b = active ? shared_data[bi] : identity();
-        __syncthreads();
-        shared_data[phys(ai)] = val_a;
-        if (active) shared_data[phys(bi)] = val_b;
-        __syncthreads();
-
-        // Save originals for inclusive conversion later
-        Element originalA = shared_data[phys(ai)];
-        Element originalB = active ? shared_data[phys(bi)] : identity();
-
-        // Up-sweep (reduce)
         for (int d = n >> 1; d > 0; d >>= 1) {
             __syncthreads();
             if (tid < d) {
-                int aii = phys(offset * (2 * tid + 1) - 1);
-                int bii = phys(offset * (2 * tid + 2) - 1);
-                shared_data[bii] = combine(shared_data[aii], shared_data[bii]);
+                int ai = offset * (2 * tid + 1) - 1;
+                int bi = offset * (2 * tid + 2) - 1;
+                // s[bi] = combine(left=s[ai], right=s[bi])
+                float new_a = s_a[bi] * s_a[ai];
+                float new_b = s_a[bi] * s_b[ai] + s_b[bi];
+                s_a[bi] = new_a;
+                s_b[bi] = new_b;
             }
             offset <<= 1;
         }
         __syncthreads();
 
+        // Save total; set root to identity for exclusive scan.
         if (tid == 0) {
-            *block_total = shared_data[phys(n - 1)];
-            shared_data[phys(n - 1)] = identity();
+            *s_tot_a = s_a[n - 1];
+            *s_tot_b = s_b[n - 1];
+            s_a[n - 1] = 1.0f;
+            s_b[n - 1] = 0.0f;
         }
         __syncthreads();
 
-        // Down-sweep (distribute)
+        // ----------------------------------------------------------------
+        // Down-sweep (distribute phase)
+        // ----------------------------------------------------------------
         for (int d = 1; d < n; d <<= 1) {
             offset >>= 1;
             __syncthreads();
             if (tid < d) {
-                int aii = phys(offset * (2 * tid + 1) - 1);
-                int bii = phys(offset * (2 * tid + 2) - 1);
-                Element t = shared_data[aii];
-                shared_data[aii] = shared_data[bii];
-                shared_data[bii] = combine(shared_data[bii], t);
+                int ai = offset * (2 * tid + 1) - 1;
+                int bi = offset * (2 * tid + 2) - 1;
+
+                // Left child gets the parent's exclusive prefix (s[bi] before swap).
+                // Right child gets combine(parent_prefix, left_subtree_total).
+                float t_a = s_a[ai], t_b = s_b[ai];   // save left-child value
+                s_a[ai] = s_a[bi];                     // left child ← parent prefix
+                s_b[ai] = s_b[bi];
+                // s[bi] = combine(left=parent_prefix, right=left_subtree_total)
+                //       = combine(old s[bi], t)
+                float new_a = t_a * s_a[ai];           // t_a * old_s_a[bi]
+                float new_b = t_a * s_b[ai] + t_b;
+                s_a[bi] = new_a;
+                s_b[bi] = new_b;
             }
         }
         __syncthreads();
 
-        // Convert exclusive -> inclusive
-        if (active) {
-            shared_data[phys(ai)] = combine(shared_data[phys(ai)], originalA);
-            shared_data[phys(bi)] = combine(shared_data[phys(bi)], originalB);
+        // ----------------------------------------------------------------
+        // Convert exclusive → inclusive:  result[i] = combine(excl[i], orig[i])
+        // Read first, barrier, then write to avoid WAR hazard.
+        // ----------------------------------------------------------------
+        float new_a = 0.0f, new_b = 0.0f;
+        if (tid < n) {
+            new_a = orig_a * s_a[tid];
+            new_b = orig_a * s_b[tid] + orig_b;
         }
         __syncthreads();
-
-        // Copy from phys positions back to direct positions for generic access.
-        // Guard bi to avoid corrupting valid data or s_total.
-        Element tmp_a = shared_data[phys(ai)];
-        Element tmp_b = active ? shared_data[phys(bi)] : identity();
-        __syncthreads();
-        shared_data[ai] = tmp_a;
-        if (active) shared_data[bi] = tmp_b;
+        if (tid < n) {
+            s_a[tid] = new_a;
+            s_b[tid] = new_b;
+        }
         __syncthreads();
     }
 };
