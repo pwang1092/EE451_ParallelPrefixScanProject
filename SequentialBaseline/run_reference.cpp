@@ -85,6 +85,19 @@ int main(int argc, char* argv[]) {
     const char* outdir = (argc > 2) ? argv[2] : "SequentialData";
     mkdir(outdir, 0755);
 
+    // CSV output path
+    char csv_path[256];
+    snprintf(csv_path, sizeof(csv_path), "%s/../Results/sequential_baseline.csv", outdir);
+    // Try Results/ relative to working dir if that fails
+    FILE* csv = fopen(csv_path, "w");
+    if (!csv) {
+        csv = fopen("../Results/sequential_baseline.csv", "w");
+    }
+    if (!csv) {
+        csv = fopen("Results/sequential_baseline.csv", "w");
+    }
+    if (csv) fprintf(csv, "kernel,D,L,time_ms,throughput_GB_s\n");
+
     printf("Sequential SSM Prefix Scan Baseline\n");
     printf("B=%d  warmup=%d  repeat=%d (median)\n", BATCH_SIZE, N_WARMUP, N_REPEAT);
     printf("input:  %s\n", indir);
@@ -120,10 +133,13 @@ int main(int argc, char* argv[]) {
             }
 
             printf("%-10d %-6d %-14.3f %-12.2f\n", L, D, ms, bw);
+            if (csv) fprintf(csv, "sequential,%d,%d,%.4f,%.3f\n", D, L, ms, bw);
             fflush(stdout);
+            if (csv) fflush(csv);
         }
     }
 
     printf("\nDone. Reference outputs saved to %s/\n", outdir);
+    if (csv) { fclose(csv); printf("Sequential timing saved to CSV.\n"); }
     return 0;
 }
