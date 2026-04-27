@@ -28,14 +28,25 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// shmem_needed<ScanImpl>: returns how many Element slots the kernel needs.
-// HillisSteele needs 2*CHUNK_SIZE (double-buffer); others need CHUNK_SIZE.
+// shmem_elements<ScanImpl>: returns how many Element slots the kernel needs.
+// HillisSteele needs 2*CHUNK_SIZE (double-buffer).
+// Blelloch needs conflict-free padding because it accesses shared_data[phys(i)].
 // ---------------------------------------------------------------------------
 template <typename ScanImpl>
 constexpr size_t shmem_elements() { return CHUNK_SIZE; }
 
 template <>
 constexpr size_t shmem_elements<HillisSteele>() { return 2 * CHUNK_SIZE; }
+
+constexpr size_t blelloch_padding(size_t i) {
+    // Must match CONFLICT_FREE_OFFSET(i) in blelloch.cu.
+    return (i >> 5) + (i >> 10);
+}
+
+template <>
+constexpr size_t shmem_elements<Blelloch>() {
+    return CHUNK_SIZE + blelloch_padding(CHUNK_SIZE - 1);
+}
 
 // ---------------------------------------------------------------------------
 // Phase 1: each block scans its own chunk independently.
