@@ -18,3 +18,4 @@ nsight_outputs/
 
 ._*
 .DS_Store
+__pycache__/
