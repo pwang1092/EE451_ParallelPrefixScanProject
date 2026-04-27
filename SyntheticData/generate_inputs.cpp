@@ -11,7 +11,7 @@
 
 static const int BATCH_SIZE    = 1;
 static const int SEQ_LENGTHS[] = { 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072 };
-static const int HIDDEN_DIMS[] = { 16, 64, 256, 512 };
+static const int HIDDEN_DIMS[] = { 1, 16, 64, 256, 512 };
 static const int N_L = sizeof(SEQ_LENGTHS) / sizeof(SEQ_LENGTHS[0]);
 static const int N_D = sizeof(HIDDEN_DIMS)  / sizeof(HIDDEN_DIMS[0]);
 
