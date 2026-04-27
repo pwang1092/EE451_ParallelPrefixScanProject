@@ -1,41 +1,66 @@
 /**
- * probe_warp_shuffle.cu — Find the maximum L per block for WarpShuffle at each D.
+ * probe_hillis_steele.cu — Find the maximum L per block for HillisSteele at each D.
  *
- * Uses dynamic shared memory so it can probe beyond the statically-defined
- * BLOCK_SIZE limit and find the true hardware ceiling.
+ * Hillis-Steele requires double-buffering: 2 * L * sizeof(Element) shared memory.
+ * Uses dynamic shared memory split into two halves to probe beyond BLOCK_SIZE.
  *
  * Build:
- *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=16  --maxrregcount=64 -o probe_ws_D16  probe_warp_shuffle.cu
- *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=64  --maxrregcount=64 -o probe_ws_D64  probe_warp_shuffle.cu
- *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=256 --maxrregcount=64 -o probe_ws_D256 probe_warp_shuffle.cu
- *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=512 --maxrregcount=64 -o probe_ws_D512 probe_warp_shuffle.cu
+ *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=16  --maxrregcount=64 -o probe_hs_D16  probe_hillis_steele.cu
+ *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=64  --maxrregcount=64 -o probe_hs_D64  probe_hillis_steele.cu
+ *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=256 --maxrregcount=64 -o probe_hs_D256 probe_hillis_steele.cu
+ *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=512 --maxrregcount=64 -o probe_hs_D512 probe_hillis_steele.cu
  */
 
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
-#include "warp_shuffle.cu"  // pulls in common.cuh then warp_shuffle.cuh
+#include "common.cuh"
+#include "hillis_steele.cuh"
 
 static constexpr size_t DEFAULT_SHMEM_LIMIT  = 48 * 1024;
 static constexpr size_t EXTENDED_SHMEM_LIMIT = 96 * 1024;
 
-// Use dynamic shared memory so the probe kernel isn't limited by
-// the static BLOCK_SIZE — we want to find the real hardware ceiling.
+// Probe kernel uses dynamic shared memory split into two halves for double-buffering.
+// This lets us probe L values beyond the static BLOCK_SIZE limit.
+// Layout: [buf_A: L elements][buf_B: L elements]
 __global__ void probe_kernel(Element* d_in, Element* d_out, int L) {
-    extern __shared__ Element shared_data[];
+    extern __shared__ Element shmem[];
+    Element* buf_A = shmem;
+    Element* buf_B = shmem + L;
     __shared__ Element block_total;
 
     int tid = threadIdx.x;
-    if (tid < L) shared_data[tid] = d_in[tid];
+    if (tid < L) buf_A[tid] = d_in[tid];
     __syncthreads();
 
-    WarpShuffle::block_scan(shared_data, L, &block_total);
+    // Run Hillis-Steele inline using buf_A/buf_B directly
+    Element* in_buf  = buf_A;
+    Element* out_buf = buf_B;
 
-    if (tid < L) d_out[tid] = shared_data[tid];
+    for (int offset = 1; offset < L; offset <<= 1) {
+        __syncthreads();
+        if (tid < L) {
+            if (tid >= offset)
+                out_buf[tid] = combine(in_buf[tid - offset], in_buf[tid]);
+            else
+                out_buf[tid] = in_buf[tid];
+        }
+        Element* tmp = in_buf; in_buf = out_buf; out_buf = tmp;
+    }
+    __syncthreads();
+
+    if (in_buf != buf_A && tid < L)
+        buf_A[tid] = in_buf[tid];
+    __syncthreads();
+
+    if (tid < L) d_out[tid] = buf_A[tid];
+    if (tid == L - 1) block_total = buf_A[tid];
+    __syncthreads();
 }
 
 int main() {
-    printf("WarpShuffle shared memory probe  D=%d  BLOCK_SIZE=%d\n\n", D, BLOCK_SIZE);
+    printf("HillisSteele shared memory probe  D=%d  BLOCK_SIZE=%d\n\n", D, BLOCK_SIZE);
+    printf("  HillisSteele needs 2 buffers: shared memory = 2 * L * sizeof(Element)\n");
     printf("  Default shmem limit:  48KB (no opt-in needed)\n");
     printf("  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)\n\n");
 
@@ -44,11 +69,11 @@ int main() {
 
     int last_pass = -1;
 
-    for (int L = 32; L <= 2048; L *= 2) {
-        // shared memory: shared_data[L] + warp_totals[L/32 + 1]
-        size_t shared_bytes = (size_t)(L + L/32 + 1) * sizeof(Element);
+    for (int L = 1; L <= 2048; L *= 2) {
+        // double buffer: 2 * L elements
+        size_t shared_bytes = (size_t)2 * L * sizeof(Element);
         double shmem_kb = shared_bytes / 1024.0;
-        int num_threads = L;  // warp shuffle uses one thread per element
+        int num_threads = L;
 
         const char* regime;
         if (shared_bytes <= DEFAULT_SHMEM_LIMIT)

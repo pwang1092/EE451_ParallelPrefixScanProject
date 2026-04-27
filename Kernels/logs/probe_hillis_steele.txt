@@ -1,0 +1,83 @@
+Probe: hillis_steele  GPU: A100 SXM4  arch=sm_80
+
+--- D=16 ---
+HillisSteele shared memory probe  D=16  BLOCK_SIZE=512
+
+  HillisSteele needs 2 buffers: shared memory = 2 * L * sizeof(Element)
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime             result
+------------------------------------------------------------------------
+1        0.2          1          default (<=48KB)         PASS
+2        0.5          2          default (<=48KB)         PASS
+4        1.0          4          default (<=48KB)         PASS
+8        2.0          8          default (<=48KB)         PASS
+16       4.0          16         default (<=48KB)         PASS
+32       8.0          32         default (<=48KB)         PASS
+64       16.0         64         default (<=48KB)         PASS
+128      32.0         128        default (<=48KB)         PASS
+256      64.0         256        *** extended (>48KB) *** PASS
+512      128.0        512        EXCEEDS 96KB             PASS
+1024     256.0        1024       EXCEEDS 96KB             invalid argument
+
+Max L per block for D=16: 512
+
+--- D=64 ---
+HillisSteele shared memory probe  D=64  BLOCK_SIZE=128
+
+  HillisSteele needs 2 buffers: shared memory = 2 * L * sizeof(Element)
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime             result
+------------------------------------------------------------------------
+1        1.0          1          default (<=48KB)         PASS
+2        2.0          2          default (<=48KB)         PASS
+4        4.0          4          default (<=48KB)         PASS
+8        8.0          8          default (<=48KB)         PASS
+16       16.0         16         default (<=48KB)         PASS
+32       32.0         32         default (<=48KB)         PASS
+64       64.0         64         *** extended (>48KB) *** PASS
+128      128.0        128        EXCEEDS 96KB             PASS
+256      256.0        256        EXCEEDS 96KB             invalid argument
+
+Max L per block for D=64: 128
+
+--- D=256 ---
+HillisSteele shared memory probe  D=256  BLOCK_SIZE=32
+
+  HillisSteele needs 2 buffers: shared memory = 2 * L * sizeof(Element)
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime             result
+------------------------------------------------------------------------
+1        4.0          1          default (<=48KB)         PASS
+2        8.0          2          default (<=48KB)         PASS
+4        16.0         4          default (<=48KB)         PASS
+8        32.0         8          default (<=48KB)         PASS
+16       64.0         16         *** extended (>48KB) *** PASS
+32       128.0        32         EXCEEDS 96KB             PASS
+64       256.0        64         EXCEEDS 96KB             invalid argument
+
+Max L per block for D=256: 32
+
+--- D=512 ---
+HillisSteele shared memory probe  D=512  BLOCK_SIZE=16
+
+  HillisSteele needs 2 buffers: shared memory = 2 * L * sizeof(Element)
+  Default shmem limit:  48KB (no opt-in needed)
+  Extended shmem limit: 96KB (requires cudaFuncSetAttribute)
+
+L        shmem_KB     threads    shmem_regime             result
+------------------------------------------------------------------------
+1        8.0          1          default (<=48KB)         PASS
+2        16.0         2          default (<=48KB)         PASS
+4        32.0         4          default (<=48KB)         PASS
+8        64.0         8          *** extended (>48KB) *** PASS
+16       128.0        16         EXCEEDS 96KB             PASS
+32       256.0        32         EXCEEDS 96KB             invalid argument
+
+Max L per block for D=512: 16
+

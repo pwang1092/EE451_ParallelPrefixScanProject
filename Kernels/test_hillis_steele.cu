@@ -2,29 +2,28 @@
  * test_hillis_steele.cu — Correctness test for HillisSteele::block_scan
  *
  * Tests single-block scan (L <= BLOCK_SIZE) against CPU reference .bin files.
- * For L > BLOCK_SIZE you need the chunked wrapper — test those configs later.
+ * For L > BLOCK_SIZE you need the chunked wrapper.
  *
  * Build:
  *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=16  --maxrregcount=64 -o test_hs_D16  test_hillis_steele.cu
  *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=64  --maxrregcount=64 -o test_hs_D64  test_hillis_steele.cu
  *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=256 --maxrregcount=64 -o test_hs_D256 test_hillis_steele.cu
  *   nvcc -O2 -std=c++17 -arch=sm_80 -DD=512 --maxrregcount=64 -o test_hs_D512 test_hillis_steele.cu
- *
- * Usage:
- *   ./test_hs_D16 [input_dir] [ref_dir]
- *   defaults: ../SyntheticData/inputs   ../SequentialBaseline/SequentialData
  */
 
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <vector>
-#include "hillis_steele.cu"  // pulls in common.cuh then hillis_steele.cuh — do not include either directly
+#include "hillis_steele.cu"  // pulls in common.cuh then hillis_steele.cuh
 
-
-// Kernel: one block, one scan. One thread per element (tid handles shared_data[tid]).
+// Kernel: one block, one scan.
+// Allocates 2 * BLOCK_SIZE elements of dynamic shared memory:
+//   [0..BLOCK_SIZE)      → shared_data (passed to block_scan)
+//   [BLOCK_SIZE..2*BLOCK_SIZE) → buf_B (used internally by block_scan via pointer arithmetic)
 __global__ void hillis_steele_kernel(Element* d_in, Element* d_out, int L) {
-    __shared__ Element shared_data[BLOCK_SIZE];
+    extern __shared__ Element shmem[];   // 2 * BLOCK_SIZE elements
+    Element* shared_data = shmem;        // first half
     __shared__ Element block_total;
 
     int tid = threadIdx.x;
@@ -55,10 +54,8 @@ static bool load_ref(const char* path, float* x, size_t n) {
     return ok;
 }
 
-// ---------------------------------------------------------------------------
-// Compare GPU output (Element array) against reference x array.
+// Compare GPU output against reference x array.
 // Element.b[d] after the scan holds exactly x[t,d].
-// ---------------------------------------------------------------------------
 static bool check(const Element* gpu_out, const float* ref, int L, float tol = 1e-4f) {
     int n_errors = 0;
     float max_err = 0.f;
@@ -86,7 +83,7 @@ int main(int argc, char* argv[]) {
     const char* indir  = (argc > 1) ? argv[1] : "../SyntheticData/inputs";
     const char* refdir = (argc > 2) ? argv[2] : "../SequentialBaseline/SequentialData";
 
-    // Test lengths scale with BLOCK_SIZE (which is D-dependent)
+    // Test lengths scale with BLOCK_SIZE (D-dependent)
     const int TEST_LENGTHS[] = {
         BLOCK_SIZE / 8,
         BLOCK_SIZE / 4,
@@ -103,17 +100,14 @@ int main(int argc, char* argv[]) {
         int L = TEST_LENGTHS[li];
         int B = 1;
 
-        // Load from L=1024 file, use first L elements
         char inpath[256];
         snprintf(inpath, sizeof(inpath), "%s/input_B%d_L1024_D%d.bin", indir, B, D);
-
         std::vector<float> a(1024 * D), b(1024 * D);
         if (!load_inputs(inpath, a.data(), b.data(), 1024 * D)) {
             fprintf(stderr, "Could not load %s\n", inpath);
             return 1;
         }
 
-        // Load reference (from L=1024 file, use first L elements)
         char refpath[256];
         snprintf(refpath, sizeof(refpath), "%s/ref_B%d_L1024_D%d.bin", refdir, B, D);
         std::vector<float> ref(1024 * D);
@@ -122,23 +116,24 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Pack into Element array
         std::vector<Element> h_in(L), h_out(L);
-        for (int t = 0; t < L; t++) {
+        for (int t = 0; t < L; t++)
             for (int d = 0; d < D; d++) {
                 h_in[t].a[d] = a[t * D + d];
                 h_in[t].b[d] = b[t * D + d];
             }
-        }
 
-        // Copy to device
         Element *d_in, *d_out;
         cudaMalloc(&d_in,  L * sizeof(Element));
         cudaMalloc(&d_out, L * sizeof(Element));
         cudaMemcpy(d_in, h_in.data(), L * sizeof(Element), cudaMemcpyHostToDevice);
 
-        // Run kernel — static shared memory only, no dynamic allocation needed
-        hillis_steele_kernel<<<1, BLOCK_SIZE>>>(d_in, d_out, L);
+        // 2 * BLOCK_SIZE for double-buffer: shared_data + buf_B
+        size_t shmem_bytes = 2 * BLOCK_SIZE * sizeof(Element);
+        cudaFuncSetAttribute(hillis_steele_kernel,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             shmem_bytes);
+        hillis_steele_kernel<<<1, BLOCK_SIZE, shmem_bytes>>>(d_in, d_out, L);
         cudaDeviceSynchronize();
 
         cudaError_t err = cudaGetLastError();

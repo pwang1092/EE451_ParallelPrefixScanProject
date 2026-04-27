@@ -1,0 +1,39 @@
+Benchmark D=16  GPU: A100 SXM4  arch=sm_80
+
+SSM Prefix Scan Benchmark  D=16  CHUNK_SIZE=512
+
+kernel           L        time_ms      GB/s         correct 
+------------------------------------------------------------
+warp_shuffle     1024     0.143        1.38         PASS    
+blelloch         1024     0.193        1.02         PASS    
+hillis_steele    1024     0.241        0.82         PASS    
+
+warp_shuffle     2048     0.146        2.70         PASS    
+blelloch         2048     0.199        1.97         PASS    
+hillis_steele    2048     0.245        1.61         PASS    
+
+warp_shuffle     4096     0.143        5.50         PASS    
+blelloch         4096     0.197        3.99         PASS    
+hillis_steele    4096     0.246        3.20         PASS    
+
+warp_shuffle     8192     0.213        7.39         PASS    
+blelloch         8192     0.263        5.98         PASS    
+hillis_steele    8192     0.316        4.97         PASS    
+
+warp_shuffle     16384    0.241        13.07        PASS    
+blelloch         16384    0.281        11.21        PASS    
+hillis_steele    16384    0.342        9.21         PASS    
+
+warp_shuffle     32768    0.242        26.00        PASS    
+blelloch         32768    0.314        20.04        PASS    
+hillis_steele    32768    0.351        17.94        PASS    
+
+warp_shuffle     65536    0.372        33.83        PASS    
+blelloch         65536    0.454        27.75        PASS    
+hillis_steele    65536    0.588        21.41        PASS    
+
+warp_shuffle     131072   0.570        44.16        PASS    
+blelloch         131072   0.700        35.97        PASS    
+hillis_steele    131072   0.889        28.32        PASS    
+
+Results saved to Results/benchmark_D16.csv
