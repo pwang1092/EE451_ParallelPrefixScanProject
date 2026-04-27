@@ -28,7 +28,7 @@
 // ---------------------------------------------------------------------------
 // Default sweep config
 // ---------------------------------------------------------------------------
-static const int DEFAULT_DIMS[]    = { 16, 64, 128, 256, 512, 1024 };
+static const int DEFAULT_DIMS[] = { 1, 16, 64, 128, 256, 512, 1024 };
 static const int N_DEFAULT_DIMS    = (int)(sizeof(DEFAULT_DIMS) / sizeof(DEFAULT_DIMS[0]));
 static const int SEQ_LENGTHS[]     = { 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072 };
 static const int N_L               = (int)(sizeof(SEQ_LENGTHS) / sizeof(SEQ_LENGTHS[0]));
