@@ -37,11 +37,13 @@ INPUT_DIR="${PROJECT_ROOT}/SyntheticData/inputs"
 REF_DIR="${PROJECT_ROOT}/SequentialBaseline/SequentialData"
 RUN_TAG="${SLURM_JOB_ID:-colab_$(date +%Y%m%d_%H%M%S)}"
 OUT_ROOT="${PROJECT_ROOT}/Results/profile_run_${RUN_TAG}"
-RAW_DIR="${OUT_ROOT}/raw_ncu"
+RAW_UTIL_DIR="${OUT_ROOT}/raw_ncu_util"
+RAW_BYTES_DIR="${OUT_ROOT}/raw_ncu_bytes"
+RAW_FLOPS_DIR="${OUT_ROOT}/raw_ncu_flops"
 BIN_DIR="${OUT_ROOT}/bin"
 TIMING_CSV="${OUT_ROOT}/timing.csv"
 
-mkdir -p "${OUT_ROOT}" "${RAW_DIR}" "${BIN_DIR}"
+mkdir -p "${OUT_ROOT}" "${RAW_UTIL_DIR}" "${RAW_BYTES_DIR}" "${RAW_FLOPS_DIR}" "${BIN_DIR}"
 rm -f "${TIMING_CSV}"
 
 GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
@@ -135,10 +137,6 @@ M_OCC="$(pick_metric \
     sm__warps_active.avg.pct_of_peak_sustained_active \
     sm__warps_active.avg.pct_of_peak_sustained_elapsed)"
 
-M_WARP_RATIO="$(pick_metric \
-    smsp__thread_inst_executed_per_inst_executed \
-    smsp__thread_inst_executed_per_inst_executed.ratio)"
-
 M_DRAM_BYTES="$(pick_metric \
     dram__bytes \
     dram__bytes.sum)"
@@ -176,40 +174,64 @@ M_SMEM_BLOCK="$(pick_metric \
 M_BLOCK_SIZE="$(pick_metric \
     launch__block_size)"
 
-M_L1_HIT="$(pick_metric \
-    l1tex__t_sectors_pipe_lsu_mem_global_op_ld_lookup_hit.sum)"
-
-M_L1_MISS="$(pick_metric \
-    l1tex__t_sectors_pipe_lsu_mem_global_op_ld_lookup_miss.sum)"
-
-M_L2_HIT="$(pick_metric \
-    lts__t_sectors_srcunit_lsu_op_read_lookup_hit.sum)"
-
-M_L2_MISS="$(pick_metric \
-    lts__t_sectors_srcunit_lsu_op_read_lookup_miss.sum)"
-
-METRICS=()
-for m in \
-    "${M_GPU_TIME}" \
-    "${M_SM_UTIL}" "${M_DRAM_UTIL}" "${M_OCC}" "${M_WARP_RATIO}" \
-    "${M_DRAM_BYTES}" "${M_DRAM_BYTES_READ}" "${M_DRAM_BYTES_WRITE}" \
-    "${M_FADD}" "${M_FMUL}" "${M_FFMA}" \
-    "${M_REGS}" "${M_SMEM_BLOCK}" "${M_BLOCK_SIZE}" \
-    "${M_L1_HIT}" "${M_L1_MISS}" "${M_L2_HIT}" "${M_L2_MISS}"; do
-    if [[ -n "${m}" ]]; then
-        METRICS+=("${m}")
-    fi
-done
-
-if [[ ${#METRICS[@]} -eq 0 ]]; then
-    echo "No Nsight metrics selected."
+if [[ -z "${M_GPU_TIME}" || -z "${M_SM_UTIL}" || -z "${M_DRAM_UTIL}" || -z "${M_OCC}" ]]; then
+    echo "Failed to resolve required utilization metrics."
     exit 1
 fi
 
-METRIC_STR="$(IFS=,; echo "${METRICS[*]}")"
+if [[ -z "${M_DRAM_BYTES}" && -z "${M_DRAM_BYTES_READ}" && -z "${M_DRAM_BYTES_WRITE}" ]]; then
+    echo "Failed to resolve any DRAM byte metrics for roofline profiling."
+    exit 1
+fi
 
-echo "Selected metrics:"
-for metric in "${METRICS[@]}"; do
+if [[ -z "${M_FADD}" && -z "${M_FMUL}" && -z "${M_FFMA}" ]]; then
+    echo "Failed to resolve any FP instruction metrics for roofline profiling."
+    exit 1
+fi
+
+UTIL_METRICS=()
+for m in \
+    "${M_GPU_TIME}" "${M_SM_UTIL}" "${M_DRAM_UTIL}" "${M_OCC}" \
+    "${M_REGS}" "${M_SMEM_BLOCK}" "${M_BLOCK_SIZE}"; do
+    if [[ -n "${m}" ]]; then
+        UTIL_METRICS+=("${m}")
+    fi
+done
+
+BYTES_METRICS=()
+for m in \
+    "${M_GPU_TIME}" "${M_DRAM_BYTES}" "${M_DRAM_BYTES_READ}" "${M_DRAM_BYTES_WRITE}"; do
+    if [[ -n "${m}" ]]; then
+        BYTES_METRICS+=("${m}")
+    fi
+done
+
+FLOPS_METRICS=()
+for m in \
+    "${M_GPU_TIME}" "${M_FADD}" "${M_FMUL}" "${M_FFMA}"; do
+    if [[ -n "${m}" ]]; then
+        FLOPS_METRICS+=("${m}")
+    fi
+done
+
+UTIL_METRIC_STR="$(IFS=,; echo "${UTIL_METRICS[*]}")"
+BYTES_METRIC_STR="$(IFS=,; echo "${BYTES_METRICS[*]}")"
+FLOPS_METRIC_STR="$(IFS=,; echo "${FLOPS_METRICS[*]}")"
+
+echo "Utilization pass metrics:"
+for metric in "${UTIL_METRICS[@]}"; do
+    echo "  - ${metric}"
+done
+echo
+
+echo "Bytes pass metrics:"
+for metric in "${BYTES_METRICS[@]}"; do
+    echo "  - ${metric}"
+done
+echo
+
+echo "FLOPs pass metrics:"
+for metric in "${FLOPS_METRICS[@]}"; do
     echo "  - ${metric}"
 done
 echo
@@ -221,6 +243,32 @@ BIN="${BIN_DIR}/profile_driver"
 echo "Compiling profile driver (runtime D)"
 nvcc -O3 -std=c++17 -arch=sm_80 --maxrregcount=64 \
     -o "${BIN}" "${SCRIPT_DIR}/profile_driver.cu"
+
+profile_pass() {
+    local metric_str="$1"
+    local log_dir="$2"
+
+    ncu \
+        --target-processes all \
+        --clock-control base \
+        --cache-control all \
+        --replay-mode kernel \
+        --csv \
+        --page raw \
+        --metrics "${metric_str}" \
+        --force-overwrite \
+        --log-file "${log_dir}/${TAG}.csv" \
+        "${BIN}" \
+            --kernel "${KERNEL}" \
+            --D "${D}" \
+            --L "${L}" \
+            --input_dir "${INPUT_DIR}" \
+            --ref_dir "${REF_DIR}" \
+            --warmup 0 \
+            --repeat 1 \
+            --skip_check \
+            --no_print
+}
 
 for D in "${D_LIST[@]}"; do
     for KERNEL in "${KERNELS[@]}"; do
@@ -246,27 +294,14 @@ for D in "${D_LIST[@]}"; do
                 --repeat 10 \
                 --csv_append "${TIMING_CSV}"
 
-            echo "[${COUNT}/${TOTAL}] Profiling ${TAG} with Nsight Compute"
-            ncu \
-                --target-processes all \
-                --clock-control base \
-                --cache-control all \
-                --replay-mode kernel \
-                --csv \
-                --page raw \
-                --metrics "${METRIC_STR}" \
-                --force-overwrite \
-                --log-file "${RAW_DIR}/${TAG}.csv" \
-                "${BIN}" \
-                    --kernel "${KERNEL}" \
-                    --D "${D}" \
-                    --L "${L}" \
-                    --input_dir "${INPUT_DIR}" \
-                    --ref_dir "${REF_DIR}" \
-                    --warmup 0 \
-                    --repeat 1 \
-                    --skip_check \
-                    --no_print
+            echo "[${COUNT}/${TOTAL}] Profiling ${TAG} with Nsight Compute (util pass)"
+            profile_pass "${UTIL_METRIC_STR}" "${RAW_UTIL_DIR}"
+
+            echo "[${COUNT}/${TOTAL}] Profiling ${TAG} with Nsight Compute (bytes pass)"
+            profile_pass "${BYTES_METRIC_STR}" "${RAW_BYTES_DIR}"
+
+            echo "[${COUNT}/${TOTAL}] Profiling ${TAG} with Nsight Compute (flops pass)"
+            profile_pass "${FLOPS_METRIC_STR}" "${RAW_FLOPS_DIR}"
         done
     done
 done
@@ -275,7 +310,9 @@ echo
 echo "Running analysis..."
 python3 "${SCRIPT_DIR}/analyze_metrics.py" \
     --timing_csv "${TIMING_CSV}" \
-    --raw_dir "${RAW_DIR}" \
+    --raw_dir "${RAW_UTIL_DIR}" \
+    --raw_dir "${RAW_BYTES_DIR}" \
+    --raw_dir "${RAW_FLOPS_DIR}" \
     --out_dir "${OUT_ROOT}" \
     --peak_bw_gbs "${PEAK_BW_GBS}" \
     --peak_fp32_gflops "${PEAK_FP32_GFLOPS}" | tee "${OUT_ROOT}/analysis_stdout.txt"

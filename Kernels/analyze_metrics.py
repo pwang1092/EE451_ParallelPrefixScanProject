@@ -669,6 +669,29 @@ def launch_to_metrics_rows(launches, kernel, d, l):
     return rows
 
 
+def merge_launch_lists(existing, incoming):
+    merged = {}
+    order = []
+
+    for launch_group in (existing, incoming):
+        for launch in launch_group:
+            key = (
+                launch.get("__launch_id__", "unknown"),
+                launch.get("__kernel_name__", "unknown"),
+            )
+            if key not in merged:
+                merged[key] = dict(launch)
+                order.append(key)
+                continue
+
+            for metric_name, metric_value in launch.items():
+                if metric_name.startswith("__") and metric_name in merged[key]:
+                    continue
+                merged[key][metric_name] = metric_value
+
+    return [merged[key] for key in order]
+
+
 def group_mean(rows, key_fields, value_fields):
     groups = defaultdict(list)
     for row in rows:
@@ -705,7 +728,8 @@ def write_csv(path, rows, fieldnames):
 def main():
     parser = argparse.ArgumentParser(description="Analyze timing + Nsight Compute CSV outputs")
     parser.add_argument("--timing_csv", required=True)
-    parser.add_argument("--raw_dir", required=True)
+    parser.add_argument("--raw_dir", action="append", required=True,
+                        help="Raw Nsight Compute CSV directory. Pass multiple times for multi-pass profiling.")
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--peak_bw_gbs", type=float, default=1555.0,
                         help="Peak DRAM bandwidth in GB/s (default: 1555)")
@@ -717,20 +741,27 @@ def main():
 
     timing = parse_timing_csv(args.timing_csv)
 
+    raw_dirs = [path for path in args.raw_dir if os.path.isdir(path)]
+
     ncu_data = {}
     launch_metric_rows = []
-    if os.path.isdir(args.raw_dir):
-        for name in os.listdir(args.raw_dir):
+    launches_by_key = {}
+    for raw_dir in raw_dirs:
+        for name in os.listdir(raw_dir):
             if not name.endswith(".csv"):
                 continue
-            full_path = os.path.join(args.raw_dir, name)
+            full_path = os.path.join(raw_dir, name)
             parsed = parse_ncu_filename(full_path)
             if not parsed:
                 continue
             kernel, d, l = parsed
             launches = parse_ncu_raw_csv(full_path)
-            ncu_data[(kernel, d, l)] = aggregate_launches(launches)
-            launch_metric_rows.extend(launch_to_metrics_rows(launches, kernel, d, l))
+            key = (kernel, d, l)
+            launches_by_key[key] = merge_launch_lists(launches_by_key.get(key, []), launches)
+
+    for (kernel, d, l), launches in launches_by_key.items():
+        ncu_data[(kernel, d, l)] = aggregate_launches(launches)
+        launch_metric_rows.extend(launch_to_metrics_rows(launches, kernel, d, l))
 
     all_keys = set(timing.keys()) | set(ncu_data.keys())
     rows = []
@@ -1001,7 +1032,7 @@ def main():
 
     emit("=== SSM PREFIX SCAN METRICS REPORT ===")
     emit(f"timing_csv: {args.timing_csv}")
-    emit(f"raw_dir:    {args.raw_dir}")
+    emit(f"raw_dirs:   {', '.join(raw_dirs) if raw_dirs else 'NA'}")
     emit(f"out_dir:    {args.out_dir}")
     emit(f"peak_bw_gbs={args.peak_bw_gbs:.3f} peak_fp32_gflops={args.peak_fp32_gflops:.3f}")
     emit("")
