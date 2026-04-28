@@ -7,9 +7,6 @@
 #include <sys/stat.h>
 #include <vector>
 
-#include "warp_shuffle.cu"
-#include "blelloch.cu"
-#include "hillis_steele.cu"
 #include "chunked_hierarchical_recursive.cuh"
 
 #define CUDA_CHECK(stmt)                                                      \
@@ -28,6 +25,7 @@ constexpr int kBatchSize = 1;
 
 struct Options {
     std::string kernel;
+    int D = -1;
     int L = -1;
     std::string input_dir = "../SyntheticData/inputs";
     std::string ref_dir = "../SequentialBaseline/SequentialData";
@@ -38,18 +36,21 @@ struct Options {
     bool skip_check = false;
 };
 
-using KernelFn = void (*)(Element*, Element*, int);
+using KernelFn = void (*)(float*, float*, float*, float*, int, int, float*);
 
-void launch_warp_shuffle(Element* d_in, Element* d_out, int L) {
-    chunked_scan<WarpShuffle>(d_in, d_out, L);
+void launch_warp_shuffle(float* d_ai, float* d_bi, float* d_ao, float* d_bo,
+                         int L, int D, float* d_sc) {
+    chunked_scan<WarpShuffle>(d_ai, d_bi, d_ao, d_bo, L, D, d_sc);
 }
 
-void launch_blelloch(Element* d_in, Element* d_out, int L) {
-    chunked_scan<Blelloch>(d_in, d_out, L);
+void launch_blelloch(float* d_ai, float* d_bi, float* d_ao, float* d_bo,
+                     int L, int D, float* d_sc) {
+    chunked_scan<Blelloch>(d_ai, d_bi, d_ao, d_bo, L, D, d_sc);
 }
 
-void launch_hillis_steele(Element* d_in, Element* d_out, int L) {
-    chunked_scan<HillisSteele>(d_in, d_out, L);
+void launch_hillis_steele(float* d_ai, float* d_bi, float* d_ao, float* d_bo,
+                          int L, int D, float* d_sc) {
+    chunked_scan<HillisSteele>(d_ai, d_bi, d_ao, d_bo, L, D, d_sc);
 }
 
 KernelFn resolve_kernel(const std::string& kernel_name) {
@@ -71,7 +72,7 @@ bool parse_int(const char* text, int* out) {
 
 void print_usage(const char* argv0) {
     printf("Usage:\n");
-    printf("  %s --kernel <warp_shuffle|blelloch|hillis_steele> --L <length> [options]\n", argv0);
+    printf("  %s --kernel <warp_shuffle|blelloch|hillis_steele> --D <dim> --L <length> [options]\n", argv0);
     printf("\nOptions:\n");
     printf("  --input_dir <path>    Default: ../SyntheticData/inputs\n");
     printf("  --ref_dir <path>      Default: ../SequentialBaseline/SequentialData\n");
@@ -94,6 +95,9 @@ bool parse_args(int argc, char* argv[], Options* options) {
         } else if (std::strcmp(arg, "--kernel") == 0) {
             if (i + 1 >= argc) return false;
             options->kernel = argv[++i];
+        } else if (std::strcmp(arg, "--D") == 0) {
+            if (i + 1 >= argc) return false;
+            if (!parse_int(argv[++i], &options->D)) return false;
         } else if (std::strcmp(arg, "--L") == 0) {
             if (i + 1 >= argc) return false;
             if (!parse_int(argv[++i], &options->L)) return false;
@@ -122,7 +126,8 @@ bool parse_args(int argc, char* argv[], Options* options) {
         }
     }
 
-    if (options->kernel.empty() || options->L <= 0 || options->warmup < 0 || options->repeat <= 0) {
+    if (options->kernel.empty() || options->D <= 0 || options->L <= 0 ||
+        options->warmup < 0 || options->repeat <= 0) {
         return false;
     }
     return true;
@@ -156,10 +161,17 @@ bool load_ref(const std::string& path, float* x, size_t n) {
     return ok;
 }
 
-bool check_output(const Element* gpu_out, const float* ref, int L, float tol = 1e-3f) {
+void to_dim_major(const float* src, float* dst, int L, int D) {
+    for (int t = 0; t < L; ++t)
+        for (int d = 0; d < D; ++d)
+            dst[d * L + t] = src[t * D + d];
+}
+
+bool check_output(const float* b_out_dm, const float* ref, int L, int D,
+                  float tol = 1e-3f) {
     for (int t = 0; t < L; ++t) {
         for (int d = 0; d < D; ++d) {
-            float got = gpu_out[t].b[d];
+            float got = b_out_dm[d * L + t];
             float expected = ref[t * D + d];
             float err = std::fabs(got - expected);
             float rel = err / fmaxf(std::fabs(expected), 1e-6f);
@@ -182,6 +194,7 @@ float median(std::vector<float>* values) {
 
 bool append_csv_row(const std::string& csv_path,
                     const std::string& kernel,
+                    int D,
                     int L,
                     float time_ms,
                     bool correct,
@@ -203,37 +216,48 @@ bool append_csv_row(const std::string& csv_path,
 
 bool run_benchmark(const Options& opt,
                    KernelFn kernel_fn,
-                   const std::vector<Element>& h_in,
+                   const std::vector<float>& h_a_dm,
+                   const std::vector<float>& h_b_dm,
                    const std::vector<float>& ref,
                    float* time_ms,
                    bool* correct,
                    double* throughput_gb_s) {
     if (!time_ms || !correct || !throughput_gb_s) return false;
 
+    const int D = opt.D;
     const int L = opt.L;
-    const size_t n = static_cast<size_t>(L) * D;
+    const size_t n = static_cast<size_t>(D) * L;
 
-    Element* d_in = nullptr;
-    Element* d_out = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_in, L * sizeof(Element)));
-    CUDA_CHECK(cudaMalloc(&d_out, L * sizeof(Element)));
+    float* d_ai = nullptr;
+    float* d_bi = nullptr;
+    float* d_ao = nullptr;
+    float* d_bo = nullptr;
+    float* d_sc = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&d_ai, n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_bi, n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_ao, n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_bo, n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_sc, 2ULL * D * L * sizeof(float)));
 
     for (int i = 0; i < opt.warmup; ++i) {
-        CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), L * sizeof(Element), cudaMemcpyHostToDevice));
-        kernel_fn(d_in, d_out, L);
+        CUDA_CHECK(cudaMemcpy(d_ai, h_a_dm.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_bi, h_b_dm.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+        kernel_fn(d_ai, d_bi, d_ao, d_bo, L, D, d_sc);
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
     *correct = true;
     if (!opt.skip_check) {
         if (opt.warmup == 0) {
-            CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), L * sizeof(Element), cudaMemcpyHostToDevice));
-            kernel_fn(d_in, d_out, L);
+            CUDA_CHECK(cudaMemcpy(d_ai, h_a_dm.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_bi, h_b_dm.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+            kernel_fn(d_ai, d_bi, d_ao, d_bo, L, D, d_sc);
             CUDA_CHECK(cudaDeviceSynchronize());
         }
-        std::vector<Element> h_out(L);
-        CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, L * sizeof(Element), cudaMemcpyDeviceToHost));
-        *correct = check_output(h_out.data(), ref.data(), L);
+        std::vector<float> h_bo(n);
+        CUDA_CHECK(cudaMemcpy(h_bo.data(), d_bo, n * sizeof(float), cudaMemcpyDeviceToHost));
+        *correct = check_output(h_bo.data(), ref.data(), L, D);
     }
 
     cudaEvent_t start = nullptr;
@@ -244,9 +268,10 @@ bool run_benchmark(const Options& opt,
     std::vector<float> samples;
     samples.reserve(opt.repeat);
     for (int r = 0; r < opt.repeat; ++r) {
-        CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), L * sizeof(Element), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_ai, h_a_dm.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_bi, h_b_dm.data(), n * sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaEventRecord(start));
-        kernel_fn(d_in, d_out, L);
+        kernel_fn(d_ai, d_bi, d_ao, d_bo, L, D, d_sc);
         CUDA_CHECK(cudaEventRecord(stop));
         CUDA_CHECK(cudaEventSynchronize(stop));
 
@@ -259,12 +284,14 @@ bool run_benchmark(const Options& opt,
     CUDA_CHECK(cudaEventDestroy(stop));
 
     *time_ms = median(&samples);
-
     const double bytes = 3.0 * static_cast<double>(n) * sizeof(float);
     *throughput_gb_s = bytes / (*time_ms * 1e-3) * 1e-9;
 
-    CUDA_CHECK(cudaFree(d_in));
-    CUDA_CHECK(cudaFree(d_out));
+    CUDA_CHECK(cudaFree(d_ai));
+    CUDA_CHECK(cudaFree(d_bi));
+    CUDA_CHECK(cudaFree(d_ao));
+    CUDA_CHECK(cudaFree(d_bo));
+    CUDA_CHECK(cudaFree(d_sc));
     return true;
 }
 
@@ -283,6 +310,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    const int D = opt.D;
     const int L = opt.L;
     const size_t n = static_cast<size_t>(kBatchSize) * L * D;
 
@@ -293,8 +321,8 @@ int main(int argc, char* argv[]) {
                            "_L" + std::to_string(L) +
                            "_D" + std::to_string(D) + ".bin";
 
-    std::vector<float> a(n), b(n), ref(n);
-    if (!load_inputs(input_path, a.data(), b.data(), n)) {
+    std::vector<float> a_tm(n), b_tm(n), ref(n);
+    if (!load_inputs(input_path, a_tm.data(), b_tm.data(), n)) {
         fprintf(stderr, "Failed to load inputs: %s\n", input_path.c_str());
         return 1;
     }
@@ -303,23 +331,19 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::vector<Element> h_in(L);
-    for (int t = 0; t < L; ++t) {
-        for (int d = 0; d < D; ++d) {
-            h_in[t].a[d] = a[t * D + d];
-            h_in[t].b[d] = b[t * D + d];
-        }
-    }
+    std::vector<float> a_dm(n), b_dm(n);
+    to_dim_major(a_tm.data(), a_dm.data(), L, D);
+    to_dim_major(b_tm.data(), b_dm.data(), L, D);
 
     float time_ms = -1.0f;
     bool correct = false;
     double throughput_gb_s = 0.0;
-    if (!run_benchmark(opt, kernel_fn, h_in, ref, &time_ms, &correct, &throughput_gb_s)) {
+    if (!run_benchmark(opt, kernel_fn, a_dm, b_dm, ref, &time_ms, &correct, &throughput_gb_s)) {
         return 1;
     }
 
     if (!opt.csv_append.empty()) {
-        if (!append_csv_row(opt.csv_append, opt.kernel, L, time_ms, correct, throughput_gb_s)) {
+        if (!append_csv_row(opt.csv_append, opt.kernel, D, L, time_ms, correct, throughput_gb_s)) {
             return 1;
         }
     }

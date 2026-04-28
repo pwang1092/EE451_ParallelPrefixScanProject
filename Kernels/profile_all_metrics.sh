@@ -22,7 +22,7 @@ module purge
 module load gcc/13.3.0
 module load cuda/12.6.3
 
-D_LIST=(16 64 256 512)
+D_LIST=(1 16 64 256 512)
 L_LIST=(1024 2048 4096 8192 16384 32768 65536 131072)
 KERNELS=(warp_shuffle blelloch hillis_steele)
 
@@ -60,17 +60,21 @@ echo "Peak BW (GB/s): ${PEAK_BW_GBS}"
 echo "Peak FP32 (GFLOP/s): ${PEAK_FP32_GFLOPS}"
 echo
 
-if [[ ! -d "${INPUT_DIR}" ]]; then
-    echo "Missing input dir: ${INPUT_DIR}"
-    echo "Generate inputs first (SyntheticData/generate_inputs.cpp)."
-    exit 1
-fi
+echo "[Stage 1/3] Generate synthetic inputs"
+GEN_BIN="${BIN_DIR}/generate_inputs"
+g++ -O2 -std=c++17 -o "${GEN_BIN}" "${PROJECT_ROOT}/SyntheticData/generate_inputs.cpp"
+mkdir -p "${INPUT_DIR}"
+"${GEN_BIN}" "${INPUT_DIR}" | tee "${OUT_ROOT}/generate_inputs.log"
 
-if [[ ! -d "${REF_DIR}" ]]; then
-    echo "Missing reference dir: ${REF_DIR}"
-    echo "Run SequentialBaseline/run_reference.sh first."
-    exit 1
-fi
+echo
+echo "[Stage 2/3] Run sequential baseline and write references"
+REF_BIN="${BIN_DIR}/run_reference"
+g++ -O2 -std=c++17 -o "${REF_BIN}" "${PROJECT_ROOT}/SequentialBaseline/run_reference.cpp"
+mkdir -p "${REF_DIR}"
+"${REF_BIN}" "${INPUT_DIR}" "${REF_DIR}" | tee "${OUT_ROOT}/run_reference.log"
+
+echo
+echo "[Stage 3/3] Profile GPU kernels"
 
 AVAIL_METRICS="$(ncu --query-metrics --chip sm_80 --csv | awk -F, 'NR>1 {gsub(/"/,"",$1); print $1}')"
 
@@ -173,21 +177,28 @@ echo
 TOTAL=$(( ${#D_LIST[@]} * ${#L_LIST[@]} * ${#KERNELS[@]} ))
 COUNT=0
 
+BIN="${BIN_DIR}/profile_driver"
+echo "Compiling profile driver (runtime D)"
+nvcc -O3 -std=c++17 -arch=sm_80 --maxrregcount=64 \
+    -o "${BIN}" "${SCRIPT_DIR}/profile_driver.cu"
+
 for D in "${D_LIST[@]}"; do
-    BIN="${BIN_DIR}/profile_driver_D${D}"
-
-    echo "Compiling profile driver for D=${D}"
-    nvcc -O3 -std=c++17 -arch=sm_80 --maxrregcount=64 -DD=${D} \
-        -o "${BIN}" "${SCRIPT_DIR}/profile_driver.cu"
-
     for KERNEL in "${KERNELS[@]}"; do
         for L in "${L_LIST[@]}"; do
             COUNT=$((COUNT + 1))
             TAG="${KERNEL}_D${D}_L${L}"
 
+            INPUT_FILE="${INPUT_DIR}/input_B1_L${L}_D${D}.bin"
+            REF_FILE="${REF_DIR}/ref_B1_L${L}_D${D}.bin"
+            if [[ ! -f "${INPUT_FILE}" || ! -f "${REF_FILE}" ]]; then
+                echo "[${COUNT}/${TOTAL}] Skipping ${TAG} (missing input/ref file)"
+                continue
+            fi
+
             echo "[${COUNT}/${TOTAL}] Timing ${TAG}"
             "${BIN}" \
                 --kernel "${KERNEL}" \
+                --D "${D}" \
                 --L "${L}" \
                 --input_dir "${INPUT_DIR}" \
                 --ref_dir "${REF_DIR}" \
@@ -208,6 +219,7 @@ for D in "${D_LIST[@]}"; do
                 --log-file "${RAW_DIR}/${TAG}.csv" \
                 "${BIN}" \
                     --kernel "${KERNEL}" \
+                    --D "${D}" \
                     --L "${L}" \
                     --input_dir "${INPUT_DIR}" \
                     --ref_dir "${REF_DIR}" \

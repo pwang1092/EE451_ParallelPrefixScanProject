@@ -49,13 +49,8 @@ def safe_div(num, den):
 
 
 def chunk_size_for_d(d):
-    if d <= 16:
-        return 512
-    if d <= 64:
-        return 128
-    if d <= 256:
-        return 32
-    return 16
+    _ = d
+    return 1024
 
 
 def parse_timing_csv(path):
@@ -147,6 +142,72 @@ def find_first_contains(metric_names, required_tokens):
     return None
 
 
+def classify_phase(kernel_name):
+    name = (kernel_name or "").lower()
+    if "phase1_scan" in name:
+        return "phase1"
+    if "phase2_scan_totals" in name:
+        return "phase2"
+    if "phase3_propagate" in name:
+        return "phase3"
+    return "other"
+
+
+def select_metric_names(metric_names):
+    duration = find_first_exact(
+        metric_names,
+        [
+            "gpu__time_duration.sum",
+            "gpu__time_duration.avg",
+        ],
+    )
+    if duration is None:
+        duration = find_first_contains(metric_names, ["time_duration", "gpu__"])
+
+    return {
+        "duration": duration,
+        "sm_util": find_first_exact(
+            metric_names,
+            ["sm__throughput.avg.pct_of_peak_sustained_elapsed"],
+        ) or find_first_contains(metric_names, ["sm__throughput", "pct_of_peak"]),
+        "dram_util": find_first_exact(
+            metric_names,
+            ["dram__throughput.avg.pct_of_peak_sustained_elapsed"],
+        ) or find_first_contains(metric_names, ["dram__throughput", "pct_of_peak"]),
+        "occ": find_first_exact(
+            metric_names,
+            ["sm__warps_active.avg.pct_of_peak_sustained_active"],
+        ) or find_first_contains(metric_names, ["sm__warps_active", "pct_of_peak"]),
+        "warp_ratio": find_first_exact(
+            metric_names,
+            ["smsp__thread_inst_executed_per_inst_executed.ratio"],
+        ) or find_first_contains(metric_names, ["thread_inst_executed_per_inst_executed", "ratio"]),
+        "dram_bytes": find_first_exact(metric_names, ["dram__bytes.sum"]),
+        "dram_bytes_read": find_first_exact(metric_names, ["dram__bytes_read.sum"]),
+        "dram_bytes_write": find_first_exact(metric_names, ["dram__bytes_write.sum"]),
+        "fadd": find_first_exact(metric_names, ["smsp__sass_thread_inst_executed_op_fadd_pred_on.sum"])
+            or find_first_contains(metric_names, ["op_fadd", "pred_on", "sum"]),
+        "fmul": find_first_exact(metric_names, ["smsp__sass_thread_inst_executed_op_fmul_pred_on.sum"])
+            or find_first_contains(metric_names, ["op_fmul", "pred_on", "sum"]),
+        "ffma": find_first_exact(metric_names, ["smsp__sass_thread_inst_executed_op_ffma_pred_on.sum"])
+            or find_first_contains(metric_names, ["op_ffma", "pred_on", "sum"]),
+        "regs": find_first_exact(metric_names, ["launch__registers_per_thread"])
+            or find_first_contains(metric_names, ["launch__registers_per_thread"]),
+        "shmem": find_first_exact(metric_names, ["launch__shared_mem_per_block_allocated"])
+            or find_first_contains(metric_names, ["launch__shared_mem_per_block"]),
+        "block_size": find_first_exact(metric_names, ["launch__block_size"])
+            or find_first_contains(metric_names, ["launch__block_size"]),
+        "l1_hit": find_first_exact(metric_names, ["l1tex__t_sectors_pipe_lsu_mem_global_op_ld_lookup_hit.sum"])
+            or find_first_contains(metric_names, ["l1tex__", "op_ld", "lookup_hit"]),
+        "l1_miss": find_first_exact(metric_names, ["l1tex__t_sectors_pipe_lsu_mem_global_op_ld_lookup_miss.sum"])
+            or find_first_contains(metric_names, ["l1tex__", "op_ld", "lookup_miss"]),
+        "l2_hit": find_first_exact(metric_names, ["lts__t_sectors_srcunit_lsu_op_read_lookup_hit.sum"])
+            or find_first_contains(metric_names, ["lts__", "op_read", "lookup_hit"]),
+        "l2_miss": find_first_exact(metric_names, ["lts__t_sectors_srcunit_lsu_op_read_lookup_miss.sum"])
+            or find_first_contains(metric_names, ["lts__", "op_read", "lookup_miss"]),
+    }
+
+
 def aggregate_launches(launches):
     if not launches:
         return {}
@@ -155,15 +216,8 @@ def aggregate_launches(launches):
     for launch in launches:
         metric_names.update(k for k in launch.keys() if not k.startswith("__"))
 
-    duration_metric = find_first_exact(
-        metric_names,
-        [
-            "gpu__time_duration.sum",
-            "gpu__time_duration.avg",
-        ],
-    )
-    if duration_metric is None:
-        duration_metric = find_first_contains(metric_names, ["time_duration", "gpu__"])
+    selected = select_metric_names(metric_names)
+    duration_metric = selected["duration"]
 
     def values(name):
         if name is None:
@@ -201,53 +255,28 @@ def aggregate_launches(launches):
             return None
         return max(vals)
 
-    sm_util_name = find_first_exact(
-        metric_names,
-        ["sm__throughput.avg.pct_of_peak_sustained_elapsed"],
-    ) or find_first_contains(metric_names, ["sm__throughput", "pct_of_peak"])
+    sm_util_name = selected["sm_util"]
+    dram_util_name = selected["dram_util"]
+    occ_name = selected["occ"]
+    warp_ratio_name = selected["warp_ratio"]
 
-    dram_util_name = find_first_exact(
-        metric_names,
-        ["dram__throughput.avg.pct_of_peak_sustained_elapsed"],
-    ) or find_first_contains(metric_names, ["dram__throughput", "pct_of_peak"])
+    dram_bytes_name = selected["dram_bytes"]
+    dram_read_bytes_name = selected["dram_bytes_read"]
+    dram_write_bytes_name = selected["dram_bytes_write"]
 
-    occ_name = find_first_exact(
-        metric_names,
-        ["sm__warps_active.avg.pct_of_peak_sustained_active"],
-    ) or find_first_contains(metric_names, ["sm__warps_active", "pct_of_peak"])
+    fadd_name = selected["fadd"]
+    fmul_name = selected["fmul"]
+    ffma_name = selected["ffma"]
 
-    warp_ratio_name = find_first_exact(
-        metric_names,
-        ["smsp__thread_inst_executed_per_inst_executed.ratio"],
-    ) or find_first_contains(metric_names, ["thread_inst_executed_per_inst_executed", "ratio"])
+    regs_name = selected["regs"]
+    shmem_name = selected["shmem"]
+    block_size_name = selected["block_size"]
 
-    dram_bytes_name = find_first_exact(metric_names, ["dram__bytes.sum"])
-    dram_read_bytes_name = find_first_exact(metric_names, ["dram__bytes_read.sum"])
-    dram_write_bytes_name = find_first_exact(metric_names, ["dram__bytes_write.sum"])
+    l1_hit_name = selected["l1_hit"]
+    l1_miss_name = selected["l1_miss"]
 
-    fadd_name = find_first_exact(metric_names, ["smsp__sass_thread_inst_executed_op_fadd_pred_on.sum"]) \
-        or find_first_contains(metric_names, ["op_fadd", "pred_on", "sum"])
-    fmul_name = find_first_exact(metric_names, ["smsp__sass_thread_inst_executed_op_fmul_pred_on.sum"]) \
-        or find_first_contains(metric_names, ["op_fmul", "pred_on", "sum"])
-    ffma_name = find_first_exact(metric_names, ["smsp__sass_thread_inst_executed_op_ffma_pred_on.sum"]) \
-        or find_first_contains(metric_names, ["op_ffma", "pred_on", "sum"])
-
-    regs_name = find_first_exact(metric_names, ["launch__registers_per_thread"]) \
-        or find_first_contains(metric_names, ["launch__registers_per_thread"])
-    shmem_name = find_first_exact(metric_names, ["launch__shared_mem_per_block_allocated"]) \
-        or find_first_contains(metric_names, ["launch__shared_mem_per_block"])
-    block_size_name = find_first_exact(metric_names, ["launch__block_size"]) \
-        or find_first_contains(metric_names, ["launch__block_size"])
-
-    l1_hit_name = find_first_exact(metric_names, ["l1tex__t_sectors_pipe_lsu_mem_global_op_ld_lookup_hit.sum"]) \
-        or find_first_contains(metric_names, ["l1tex__", "op_ld", "lookup_hit"])
-    l1_miss_name = find_first_exact(metric_names, ["l1tex__t_sectors_pipe_lsu_mem_global_op_ld_lookup_miss.sum"]) \
-        or find_first_contains(metric_names, ["l1tex__", "op_ld", "lookup_miss"])
-
-    l2_hit_name = find_first_exact(metric_names, ["lts__t_sectors_srcunit_lsu_op_read_lookup_hit.sum"]) \
-        or find_first_contains(metric_names, ["lts__", "op_read", "lookup_hit"])
-    l2_miss_name = find_first_exact(metric_names, ["lts__t_sectors_srcunit_lsu_op_read_lookup_miss.sum"]) \
-        or find_first_contains(metric_names, ["lts__", "op_read", "lookup_miss"])
+    l2_hit_name = selected["l2_hit"]
+    l2_miss_name = selected["l2_miss"]
 
     dram_bytes = metric_sum(dram_bytes_name)
     if dram_bytes is None:
@@ -295,6 +324,80 @@ def aggregate_launches(launches):
         "l1_hit_rate_pct": l1_hit_rate,
         "l2_hit_rate_pct": l2_hit_rate,
     }
+
+
+def launch_to_metrics_rows(launches, kernel, d, l):
+    if not launches:
+        return []
+
+    metric_names = set()
+    for launch in launches:
+        metric_names.update(k for k in launch.keys() if not k.startswith("__"))
+
+    selected = select_metric_names(metric_names)
+
+    rows = []
+    for launch in launches:
+        def val(name):
+            if name is None:
+                return None
+            return launch.get(name)
+
+        gpu_time = val(selected["duration"])
+        sm_util = val(selected["sm_util"])
+        dram_util = val(selected["dram_util"])
+        occ = val(selected["occ"])
+        warp_ratio = val(selected["warp_ratio"])
+
+        dram_bytes = val(selected["dram_bytes"])
+        if dram_bytes is None:
+            read_bytes = val(selected["dram_bytes_read"])
+            write_bytes = val(selected["dram_bytes_write"])
+            if read_bytes is not None or write_bytes is not None:
+                dram_bytes = (read_bytes or 0.0) + (write_bytes or 0.0)
+
+        fadd = val(selected["fadd"])
+        fmul = val(selected["fmul"])
+        ffma = val(selected["ffma"])
+        flops = None
+        if fadd is not None or fmul is not None or ffma is not None:
+            flops = (fadd or 0.0) + (fmul or 0.0) + 2.0 * (ffma or 0.0)
+
+        l1_hit = val(selected["l1_hit"])
+        l1_miss = val(selected["l1_miss"])
+        l1_hit_rate = None
+        if l1_hit is not None and l1_miss is not None and (l1_hit + l1_miss) > 0:
+            l1_hit_rate = 100.0 * l1_hit / (l1_hit + l1_miss)
+
+        l2_hit = val(selected["l2_hit"])
+        l2_miss = val(selected["l2_miss"])
+        l2_hit_rate = None
+        if l2_hit is not None and l2_miss is not None and (l2_hit + l2_miss) > 0:
+            l2_hit_rate = 100.0 * l2_hit / (l2_hit + l2_miss)
+
+        kernel_name = launch.get("__kernel_name__", "unknown")
+        rows.append({
+            "kernel": kernel,
+            "D": d,
+            "L": l,
+            "launch_id": launch.get("__launch_id__", "unknown"),
+            "launch_kernel_name": kernel_name,
+            "phase": classify_phase(kernel_name),
+            "gpu_time_duration": gpu_time,
+            "sm_util_pct": sm_util,
+            "dram_util_pct": dram_util,
+            "achieved_occupancy_pct": occ,
+            "warp_threads_per_inst": warp_ratio,
+            "dram_bytes": dram_bytes,
+            "flops": flops,
+            "registers_per_thread": val(selected["regs"]),
+            "shared_mem_per_block_bytes": val(selected["shmem"]),
+            "block_size": val(selected["block_size"]),
+            "l1_hit_rate_pct": l1_hit_rate,
+            "l2_hit_rate_pct": l2_hit_rate,
+        })
+
+    return rows
 
 
 def group_mean(rows, key_fields, value_fields):
@@ -346,6 +449,7 @@ def main():
     timing = parse_timing_csv(args.timing_csv)
 
     ncu_data = {}
+    launch_metric_rows = []
     if os.path.isdir(args.raw_dir):
         for name in os.listdir(args.raw_dir):
             if not name.endswith(".csv"):
@@ -357,6 +461,7 @@ def main():
             kernel, d, l = parsed
             launches = parse_ncu_raw_csv(full_path)
             ncu_data[(kernel, d, l)] = aggregate_launches(launches)
+            launch_metric_rows.extend(launch_to_metrics_rows(launches, kernel, d, l))
 
     all_keys = set(timing.keys()) | set(ncu_data.keys())
     rows = []
@@ -435,6 +540,94 @@ def main():
         rows.append(row)
 
     rows.sort(key=sort_key)
+
+    launch_metric_rows.sort(key=lambda r: (
+        r["D"],
+        r["L"],
+        KERNEL_ORDER.get(r["kernel"], 999),
+        r["phase"],
+        str(r["launch_id"]),
+    ))
+
+    launch_metrics_csv = os.path.join(args.out_dir, "kernel_launch_metrics.csv")
+    write_csv(
+        launch_metrics_csv,
+        launch_metric_rows,
+        [
+            "kernel", "D", "L", "launch_id", "launch_kernel_name", "phase",
+            "gpu_time_duration", "sm_util_pct", "dram_util_pct",
+            "achieved_occupancy_pct", "warp_threads_per_inst", "dram_bytes", "flops",
+            "registers_per_thread", "shared_mem_per_block_bytes", "block_size",
+            "l1_hit_rate_pct", "l2_hit_rate_pct",
+        ],
+    )
+
+    phase_acc = {}
+    for row in launch_metric_rows:
+        key = (row["kernel"], row["D"], row["L"])
+        if key not in phase_acc:
+            phase_acc[key] = {
+                "phase1_time": 0.0,
+                "phase2_time": 0.0,
+                "phase3_time": 0.0,
+                "other_time": 0.0,
+                "phase1_launches": 0,
+                "phase2_launches": 0,
+                "phase3_launches": 0,
+                "other_launches": 0,
+            }
+        phase = row["phase"]
+        dur = row.get("gpu_time_duration")
+        if phase == "phase1":
+            phase_acc[key]["phase1_launches"] += 1
+            if dur is not None:
+                phase_acc[key]["phase1_time"] += dur
+        elif phase == "phase2":
+            phase_acc[key]["phase2_launches"] += 1
+            if dur is not None:
+                phase_acc[key]["phase2_time"] += dur
+        elif phase == "phase3":
+            phase_acc[key]["phase3_launches"] += 1
+            if dur is not None:
+                phase_acc[key]["phase3_time"] += dur
+        else:
+            phase_acc[key]["other_launches"] += 1
+            if dur is not None:
+                phase_acc[key]["other_time"] += dur
+
+    phase_rows = []
+    for (kernel, d, l), stats in sorted(phase_acc.items(), key=lambda x: (x[0][1], x[0][2], KERNEL_ORDER.get(x[0][0], 999))):
+        total = stats["phase1_time"] + stats["phase2_time"] + stats["phase3_time"] + stats["other_time"]
+        phase_rows.append({
+            "kernel": kernel,
+            "D": d,
+            "L": l,
+            "phase1_time": stats["phase1_time"],
+            "phase2_time": stats["phase2_time"],
+            "phase3_time": stats["phase3_time"],
+            "other_time": stats["other_time"],
+            "total_time": total,
+            "phase1_pct": (100.0 * stats["phase1_time"] / total) if total > 0 else None,
+            "phase2_pct": (100.0 * stats["phase2_time"] / total) if total > 0 else None,
+            "phase3_pct": (100.0 * stats["phase3_time"] / total) if total > 0 else None,
+            "other_pct": (100.0 * stats["other_time"] / total) if total > 0 else None,
+            "phase1_launches": stats["phase1_launches"],
+            "phase2_launches": stats["phase2_launches"],
+            "phase3_launches": stats["phase3_launches"],
+            "other_launches": stats["other_launches"],
+        })
+
+    phase_breakdown_csv = os.path.join(args.out_dir, "phase_breakdown.csv")
+    write_csv(
+        phase_breakdown_csv,
+        phase_rows,
+        [
+            "kernel", "D", "L",
+            "phase1_time", "phase2_time", "phase3_time", "other_time", "total_time",
+            "phase1_pct", "phase2_pct", "phase3_pct", "other_pct",
+            "phase1_launches", "phase2_launches", "phase3_launches", "other_launches",
+        ],
+    )
 
     merged_csv = os.path.join(args.out_dir, "merged_metrics.csv")
     merged_fields = [
@@ -573,6 +766,23 @@ def main():
         )
     emit("")
 
+    emit("=== PHASE BREAKDOWN (gpu_time_duration shares) ===")
+    emit("kernel,D,L,phase1_time,phase2_time,phase3_time,other_time,total_time,phase1_pct,phase2_pct,phase3_pct,other_pct")
+    for row in phase_rows:
+        emit(
+            f"{row['kernel']},{row['D']},{row['L']},"
+            f"{fmt(row['phase1_time'], 4)},"
+            f"{fmt(row['phase2_time'], 4)},"
+            f"{fmt(row['phase3_time'], 4)},"
+            f"{fmt(row['other_time'], 4)},"
+            f"{fmt(row['total_time'], 4)},"
+            f"{fmt(row['phase1_pct'], 2)},"
+            f"{fmt(row['phase2_pct'], 2)},"
+            f"{fmt(row['phase3_pct'], 2)},"
+            f"{fmt(row['other_pct'], 2)}"
+        )
+    emit("")
+
     emit("=== OCCUPANCY/REGISTER SUMMARY (avg over L) ===")
     emit("kernel,D,occ_pct_avg,resident_warps_avg,warp_eff_avg,regs_peak_avg,block_size_avg,shared_mem_B_avg,sm_util_avg,dram_util_avg,bw_util_avg")
     for item in occ_summary:
@@ -598,6 +808,8 @@ def main():
 
     emit("=== OUTPUT FILES ===")
     emit(f"merged_metrics_csv: {merged_csv}")
+    emit(f"kernel_launch_metrics_csv: {launch_metrics_csv}")
+    emit(f"phase_breakdown_csv: {phase_breakdown_csv}")
     emit(f"occupancy_summary_csv: {occ_summary_csv}")
     emit(f"crossover_summary_csv: {crossover_csv}")
 
