@@ -84,48 +84,136 @@ def parse_ncu_filename(path):
 
 
 def parse_ncu_raw_csv(path):
-    launches = {}
-    header = None
     with open(path, newline="") as f:
         reader = csv.reader(f)
+        first_nonempty = None
+        for row in reader:
+            if not row:
+                continue
+            cells = [c.strip() for c in row]
+            if any(cells):
+                first_nonempty = cells
+                break
+
+    if not first_nonempty:
+        return []
+
+    first_lower = {c.lower() for c in first_nonempty}
+
+    # Legacy long format: one metric per row.
+    if "metric name" in first_lower and "metric value" in first_lower:
+        launches = {}
+        header = first_nonempty
+        with open(path, newline="") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row:
+                    continue
+
+                cells = [c.strip() for c in row]
+                if cells == header:
+                    continue
+                if len(cells) < len(header):
+                    continue
+
+                record = {header[i]: cells[i] for i in range(len(header))}
+                lower = {k.lower(): v for k, v in record.items()}
+
+                metric_name = lower.get("metric name") or lower.get("metric name / label")
+                metric_value_text = lower.get("metric value") or lower.get("value")
+                if not metric_name or metric_value_text is None:
+                    continue
+
+                metric_value = parse_float(metric_value_text)
+                if metric_value is None:
+                    continue
+
+                launch_id = lower.get("id") or lower.get("kernel id") or "unknown"
+                kernel_name = lower.get("kernel name") or lower.get("kernel name / demangled") or "unknown"
+                launch_key = f"{launch_id}|{kernel_name}"
+
+                if launch_key not in launches:
+                    launches[launch_key] = {
+                        "__launch_id__": launch_id,
+                        "__kernel_name__": kernel_name,
+                    }
+                launches[launch_key][metric_name] = metric_value
+
+        return list(launches.values())
+
+    # Nsight Compute wide format: one launch per row, metrics as columns.
+    launches = []
+    metadata_cols = {
+        "id",
+        "process id",
+        "process name",
+        "host name",
+        "kernel id",
+        "kernel name",
+        "kernel name / demangled",
+        "context",
+        "stream",
+        "device",
+        "green context id",
+        "section name",
+        "section id",
+    }
+
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
         for row in reader:
             if not row:
                 continue
 
-            cells = [c.strip() for c in row]
-            if "Metric Name" in cells and "Metric Value" in cells:
-                header = cells
+            key_map = {}
+            for k in row.keys():
+                if k is None:
+                    continue
+                key_map[k.lower().strip()] = k
+
+            id_col = key_map.get("id") or key_map.get("kernel id")
+            name_col = key_map.get("kernel name") or key_map.get("kernel name / demangled")
+
+            launch_id_text = row.get(id_col, "") if id_col else ""
+            launch_id_val = parse_float(launch_id_text)
+
+            # Skip units row and any malformed/non-launch rows.
+            if launch_id_val is None:
                 continue
 
-            if header is None:
-                continue
-            if len(cells) < len(header):
-                continue
+            if float(launch_id_val).is_integer():
+                launch_id = str(int(launch_id_val))
+            else:
+                launch_id = str(launch_id_val)
 
-            record = {header[i]: cells[i] for i in range(len(header))}
-            lower = {k.lower(): v for k, v in record.items()}
+            kernel_name = (row.get(name_col, "") if name_col else "").strip() or "unknown"
 
-            metric_name = lower.get("metric name") or lower.get("metric name / label")
-            metric_value_text = lower.get("metric value") or lower.get("value")
-            if not metric_name or metric_value_text is None:
-                continue
+            launch = {
+                "__launch_id__": launch_id,
+                "__kernel_name__": kernel_name,
+            }
 
-            metric_value = parse_float(metric_value_text)
-            if metric_value is None:
-                continue
+            numeric_metrics = 0
+            for col in row.keys():
+                if col is None:
+                    continue
+                col_name = col.strip()
+                if not col_name:
+                    continue
+                if col_name.lower() in metadata_cols:
+                    continue
 
-            launch_id = lower.get("id") or lower.get("kernel id") or "unknown"
-            kernel_name = lower.get("kernel name") or lower.get("kernel name / demangled") or "unknown"
-            launch_key = f"{launch_id}|{kernel_name}"
+                value = parse_float(row.get(col))
+                if value is None:
+                    continue
 
-            if launch_key not in launches:
-                launches[launch_key] = {
-                    "__launch_id__": launch_id,
-                    "__kernel_name__": kernel_name,
-                }
-            launches[launch_key][metric_name] = metric_value
+                launch[col_name] = value
+                numeric_metrics += 1
 
-    return list(launches.values())
+            if numeric_metrics > 0:
+                launches.append(launch)
+
+    return launches
 
 
 def find_first_exact(metric_names, candidates):
