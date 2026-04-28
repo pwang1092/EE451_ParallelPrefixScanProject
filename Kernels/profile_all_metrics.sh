@@ -108,7 +108,8 @@ pick_metric() {
         fi
     done
     echo ""
-    return 1
+    # Missing metrics are expected across Nsight versions; callers filter empties.
+    return 0
 }
 
 M_GPU_TIME="$(pick_metric \
