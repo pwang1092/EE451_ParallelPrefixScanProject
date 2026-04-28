@@ -395,12 +395,12 @@ def select_metric_names(metric_names):
         "dram_util": find_first_exact(
             metric_names,
             [
-                "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
-                "gpu__dram_throughput.avg.pct_of_peak_sustained_active",
                 "dram__throughput.avg.pct_of_peak_sustained_elapsed",
                 "dram__throughput.avg.pct_of_peak_sustained_active",
-                "gpu__dram_throughput",
                 "dram__throughput",
+                "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
+                "gpu__dram_throughput.avg.pct_of_peak_sustained_active",
+                "gpu__dram_throughput",
             ],
         ) or find_first_contains(metric_names, ["dram_throughput", "pct_of_peak"]),
         "occ": find_first_exact(
