@@ -1,0 +1,1 @@
+kernel,D,L,launch_id,launch_kernel_name,phase,gpu_time_duration,sm_util_pct,dram_util_pct,achieved_occupancy_pct,warp_threads_per_inst,dram_bytes,flops,registers_per_thread,shared_mem_per_block_bytes,block_size,l1_hit_rate_pct,l2_hit_rate_pct
