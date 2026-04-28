@@ -85,59 +85,81 @@ def parse_ncu_filename(path):
 
 def parse_ncu_raw_csv(path):
     with open(path, newline="") as f:
-        reader = csv.reader(f)
-        first_nonempty = None
-        for row in reader:
-            if not row:
-                continue
-            cells = [c.strip() for c in row]
-            if any(cells):
-                first_nonempty = cells
-                break
+        rows = list(csv.reader(f))
 
-    if not first_nonempty:
+    if not rows:
         return []
 
-    first_lower = {c.lower() for c in first_nonempty}
+    header_idx = None
+    header = None
+    header_kind = None
+
+    for idx, row in enumerate(rows):
+        if not row:
+            continue
+        cells = [c.strip() for c in row]
+        if not any(cells):
+            continue
+
+        lower = {c.lower() for c in cells if c}
+
+        if "metric name" in lower and ("metric value" in lower or "value" in lower):
+            header_idx = idx
+            header = cells
+            header_kind = "legacy"
+            break
+
+        has_launch_id = "id" in lower or "kernel id" in lower
+        has_kernel_name = "kernel name" in lower or "kernel name / demangled" in lower
+        if has_launch_id and has_kernel_name:
+            header_idx = idx
+            header = cells
+            header_kind = "wide"
+            break
+
+    if header_idx is None or header is None or header_kind is None:
+        return []
 
     # Legacy long format: one metric per row.
-    if "metric name" in first_lower and "metric value" in first_lower:
+    if header_kind == "legacy":
         launches = {}
-        header = first_nonempty
-        with open(path, newline="") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if not row:
-                    continue
+        for row in rows[header_idx + 1:]:
+            if not row:
+                continue
 
-                cells = [c.strip() for c in row]
-                if cells == header:
-                    continue
-                if len(cells) < len(header):
-                    continue
+            cells = [c.strip() for c in row]
+            if not any(cells):
+                continue
+            if cells == header:
+                continue
 
-                record = {header[i]: cells[i] for i in range(len(header))}
-                lower = {k.lower(): v for k, v in record.items()}
+            if len(cells) < len(header):
+                cells = cells + [""] * (len(header) - len(cells))
+            elif len(cells) > len(header):
+                cells = cells[:len(header)]
 
-                metric_name = lower.get("metric name") or lower.get("metric name / label")
-                metric_value_text = lower.get("metric value") or lower.get("value")
-                if not metric_name or metric_value_text is None:
-                    continue
+            record = {header[i]: cells[i] for i in range(len(header))}
+            lower = {k.lower(): v for k, v in record.items()}
 
-                metric_value = parse_float(metric_value_text)
-                if metric_value is None:
-                    continue
+            metric_name = lower.get("metric name") or lower.get("metric name / label")
+            metric_value_text = lower.get("metric value") or lower.get("value")
+            if not metric_name or metric_value_text is None:
+                continue
 
-                launch_id = lower.get("id") or lower.get("kernel id") or "unknown"
-                kernel_name = lower.get("kernel name") or lower.get("kernel name / demangled") or "unknown"
-                launch_key = f"{launch_id}|{kernel_name}"
+            metric_value = parse_float(metric_value_text)
+            if metric_value is None:
+                continue
 
-                if launch_key not in launches:
-                    launches[launch_key] = {
-                        "__launch_id__": launch_id,
-                        "__kernel_name__": kernel_name,
-                    }
-                launches[launch_key][metric_name] = metric_value
+            launch_id = lower.get("id") or lower.get("kernel id") or "unknown"
+            kernel_name = lower.get("kernel name") or lower.get("kernel name / demangled") or "unknown"
+            launch_key = f"{launch_id}|{kernel_name}"
+
+            if launch_key not in launches:
+                launches[launch_key] = {
+                    "__launch_id__": launch_id,
+                    "__kernel_name__": kernel_name,
+                }
+            launches[launch_key][metric_name] = metric_value
 
         return list(launches.values())
 
@@ -159,59 +181,73 @@ def parse_ncu_raw_csv(path):
         "section id",
     }
 
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if not row:
+    key_map = {}
+    for i, name in enumerate(header):
+        key = name.lower().strip()
+        if key:
+            key_map[key] = i
+
+    id_idx = key_map.get("id")
+    if id_idx is None:
+        id_idx = key_map.get("kernel id")
+
+    name_idx = key_map.get("kernel name")
+    if name_idx is None:
+        name_idx = key_map.get("kernel name / demangled")
+
+    if id_idx is None:
+        return []
+
+    for row in rows[header_idx + 1:]:
+        if not row:
+            continue
+
+        cells = [c.strip() for c in row]
+        if not any(cells):
+            continue
+
+        if len(cells) < len(header):
+            cells = cells + [""] * (len(header) - len(cells))
+        elif len(cells) > len(header):
+            cells = cells[:len(header)]
+
+        launch_id_val = parse_float(cells[id_idx])
+
+        # Skip units row and any malformed/non-launch rows.
+        if launch_id_val is None:
+            continue
+
+        if float(launch_id_val).is_integer():
+            launch_id = str(int(launch_id_val))
+        else:
+            launch_id = str(launch_id_val)
+
+        kernel_name = "unknown"
+        if name_idx is not None:
+            kernel_name = cells[name_idx].strip() or "unknown"
+
+        launch = {
+            "__launch_id__": launch_id,
+            "__kernel_name__": kernel_name,
+        }
+
+        numeric_metrics = 0
+        for i, col in enumerate(header):
+            col_name = col.strip()
+            if not col_name:
+                continue
+            if col_name.lower() in metadata_cols:
                 continue
 
-            key_map = {}
-            for k in row.keys():
-                if k is None:
-                    continue
-                key_map[k.lower().strip()] = k
-
-            id_col = key_map.get("id") or key_map.get("kernel id")
-            name_col = key_map.get("kernel name") or key_map.get("kernel name / demangled")
-
-            launch_id_text = row.get(id_col, "") if id_col else ""
-            launch_id_val = parse_float(launch_id_text)
-
-            # Skip units row and any malformed/non-launch rows.
-            if launch_id_val is None:
+            value = parse_float(cells[i])
+            if value is None:
                 continue
 
-            if float(launch_id_val).is_integer():
-                launch_id = str(int(launch_id_val))
-            else:
-                launch_id = str(launch_id_val)
+            launch[col_name] = value
+            numeric_metrics += 1
 
-            kernel_name = (row.get(name_col, "") if name_col else "").strip() or "unknown"
-
-            launch = {
-                "__launch_id__": launch_id,
-                "__kernel_name__": kernel_name,
-            }
-
-            numeric_metrics = 0
-            for col in row.keys():
-                if col is None:
-                    continue
-                col_name = col.strip()
-                if not col_name:
-                    continue
-                if col_name.lower() in metadata_cols:
-                    continue
-
-                value = parse_float(row.get(col))
-                if value is None:
-                    continue
-
-                launch[col_name] = value
-                numeric_metrics += 1
-
-            if numeric_metrics > 0:
-                launches.append(launch)
+        if numeric_metrics > 0:
+            launches.append(launch)
 
     return launches
 
