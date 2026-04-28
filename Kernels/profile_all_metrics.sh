@@ -115,54 +115,57 @@ pick_metric() {
 }
 
 M_GPU_TIME="$(pick_metric \
-    gpu__time_duration \
     gpu__time_duration.sum \
-    gpu__time_duration.avg)"
+    gpu__time_duration.avg \
+    gpu__time_duration)"
 
 M_SM_UTIL="$(pick_metric \
-    sm__throughput \
     sm__throughput.avg.pct_of_peak_sustained_elapsed \
-    sm__throughput.avg.pct_of_peak_sustained_active)"
+    sm__throughput.avg.pct_of_peak_sustained_active \
+    sm__throughput)"
 
 M_DRAM_UTIL="$(pick_metric \
-    gpu__dram_throughput \
-    dram__throughput \
     gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed \
     gpu__dram_throughput.avg.pct_of_peak_sustained_active \
     dram__throughput.avg.pct_of_peak_sustained_elapsed \
-    dram__throughput.avg.pct_of_peak_sustained_active)"
+    dram__throughput.avg.pct_of_peak_sustained_active \
+    gpu__dram_throughput \
+    dram__throughput)"
 
 M_OCC="$(pick_metric \
-    sm__warps_active \
     sm__warps_active.avg.pct_of_peak_sustained_active \
-    sm__warps_active.avg.pct_of_peak_sustained_elapsed)"
+    sm__warps_active.avg.pct_of_peak_sustained_elapsed \
+    sm__warps_active)"
 
 M_DRAM_BYTES="$(pick_metric \
-    dram__bytes \
-    dram__bytes.sum)"
+    dram__bytes.sum \
+    dram__bytes)"
 
 M_DRAM_BYTES_READ="$(pick_metric \
-    dram__bytes_read \
-    dram__bytes_read.sum)"
+    dram__bytes_read.sum \
+    dram__bytes_read)"
 
 M_DRAM_BYTES_WRITE="$(pick_metric \
-    dram__bytes_write \
-    dram__bytes_write.sum)"
+    dram__bytes_write.sum \
+    dram__bytes_write)"
 
 M_FADD="$(pick_metric \
+    smsp__sass_thread_inst_executed_op_fadd_pred_on.sum \
+    sm__sass_thread_inst_executed_op_fadd_pred_on.sum \
     smsp__sass_thread_inst_executed_op_fadd_pred_on \
-    sm__sass_thread_inst_executed_op_fadd_pred_on \
-    smsp__sass_thread_inst_executed_op_fadd_pred_on.sum)"
+    sm__sass_thread_inst_executed_op_fadd_pred_on)"
 
 M_FMUL="$(pick_metric \
+    smsp__sass_thread_inst_executed_op_fmul_pred_on.sum \
+    sm__sass_thread_inst_executed_op_fmul_pred_on.sum \
     smsp__sass_thread_inst_executed_op_fmul_pred_on \
-    sm__sass_thread_inst_executed_op_fmul_pred_on \
-    smsp__sass_thread_inst_executed_op_fmul_pred_on.sum)"
+    sm__sass_thread_inst_executed_op_fmul_pred_on)"
 
 M_FFMA="$(pick_metric \
+    smsp__sass_thread_inst_executed_op_ffma_pred_on.sum \
+    sm__sass_thread_inst_executed_op_ffma_pred_on.sum \
     smsp__sass_thread_inst_executed_op_ffma_pred_on \
-    sm__sass_thread_inst_executed_op_ffma_pred_on \
-    smsp__sass_thread_inst_executed_op_ffma_pred_on.sum)"
+    sm__sass_thread_inst_executed_op_ffma_pred_on)"
 
 M_REGS="$(pick_metric \
     launch__registers_per_thread)"

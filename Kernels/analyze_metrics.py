@@ -374,9 +374,9 @@ def select_metric_names(metric_names):
     duration = find_first_exact(
         metric_names,
         [
-            "gpu__time_duration",
             "gpu__time_duration.sum",
             "gpu__time_duration.avg",
+            "gpu__time_duration",
         ],
     )
     if duration is None:
