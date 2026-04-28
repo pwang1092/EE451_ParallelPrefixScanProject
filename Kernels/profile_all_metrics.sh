@@ -18,9 +18,16 @@ cd "${SCRIPT_DIR}"
 
 mkdir -p logs
 
-module purge
-module load gcc/13.3.0
-module load cuda/12.6.3
+if [[ -f /etc/profile.d/modules.sh ]]; then
+    # CARC exposes the environment-modules function here.
+    source /etc/profile.d/modules.sh
+fi
+
+if command -v module >/dev/null 2>&1; then
+    module purge
+    module load gcc/13.3.0
+    module load cuda/12.6.3
+fi
 
 D_LIST=(1 16 64 256 512)
 L_LIST=(1024 2048 4096 8192 16384 32768 65536 131072)
@@ -28,7 +35,8 @@ KERNELS=(warp_shuffle blelloch hillis_steele)
 
 INPUT_DIR="${PROJECT_ROOT}/SyntheticData/inputs"
 REF_DIR="${PROJECT_ROOT}/SequentialBaseline/SequentialData"
-OUT_ROOT="${PROJECT_ROOT}/Results/profile_run_${SLURM_JOB_ID}"
+RUN_TAG="${SLURM_JOB_ID:-colab_$(date +%Y%m%d_%H%M%S)}"
+OUT_ROOT="${PROJECT_ROOT}/Results/profile_run_${RUN_TAG}"
 RAW_DIR="${OUT_ROOT}/raw_ncu"
 BIN_DIR="${OUT_ROOT}/bin"
 TIMING_CSV="${OUT_ROOT}/timing.csv"
@@ -76,7 +84,21 @@ mkdir -p "${REF_DIR}"
 echo
 echo "[Stage 3/3] Profile GPU kernels"
 
-AVAIL_METRICS="$(ncu --query-metrics --chip sm_80 --csv | awk -F, 'NR>1 {gsub(/"/,"",$1); print $1}')"
+QUERY_MODE=""
+QUERY_OUTPUT=""
+if QUERY_OUTPUT="$(ncu --query-metrics --chips ga100 --csv 2>/dev/null)"; then
+    QUERY_MODE="--chips ga100"
+elif QUERY_OUTPUT="$(ncu --query-metrics --chip sm_80 --csv 2>/dev/null)"; then
+    QUERY_MODE="--chip sm_80"
+elif QUERY_OUTPUT="$(ncu --query-metrics --csv 2>/dev/null)"; then
+    QUERY_MODE="default"
+else
+    echo "Failed to query Nsight Compute metrics."
+    exit 1
+fi
+
+AVAIL_METRICS="$(printf '%s\n' "${QUERY_OUTPUT}" | awk -F, 'NR>1 {gsub(/"/,"",$1); print $1}')"
+echo "Metric query mode: ${QUERY_MODE}"
 
 pick_metric() {
     for candidate in "$@"; do
@@ -90,40 +112,57 @@ pick_metric() {
 }
 
 M_GPU_TIME="$(pick_metric \
+    gpu__time_duration \
     gpu__time_duration.sum \
     gpu__time_duration.avg)"
 
 M_SM_UTIL="$(pick_metric \
+    sm__throughput \
     sm__throughput.avg.pct_of_peak_sustained_elapsed \
     sm__throughput.avg.pct_of_peak_sustained_active)"
 
 M_DRAM_UTIL="$(pick_metric \
+    gpu__dram_throughput \
+    dram__throughput \
+    gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed \
+    gpu__dram_throughput.avg.pct_of_peak_sustained_active \
     dram__throughput.avg.pct_of_peak_sustained_elapsed \
     dram__throughput.avg.pct_of_peak_sustained_active)"
 
 M_OCC="$(pick_metric \
+    sm__warps_active \
     sm__warps_active.avg.pct_of_peak_sustained_active \
     sm__warps_active.avg.pct_of_peak_sustained_elapsed)"
 
 M_WARP_RATIO="$(pick_metric \
+    smsp__thread_inst_executed_per_inst_executed \
     smsp__thread_inst_executed_per_inst_executed.ratio)"
 
 M_DRAM_BYTES="$(pick_metric \
+    dram__bytes \
     dram__bytes.sum)"
 
 M_DRAM_BYTES_READ="$(pick_metric \
+    dram__bytes_read \
     dram__bytes_read.sum)"
 
 M_DRAM_BYTES_WRITE="$(pick_metric \
+    dram__bytes_write \
     dram__bytes_write.sum)"
 
 M_FADD="$(pick_metric \
+    smsp__sass_thread_inst_executed_op_fadd_pred_on \
+    sm__sass_thread_inst_executed_op_fadd_pred_on \
     smsp__sass_thread_inst_executed_op_fadd_pred_on.sum)"
 
 M_FMUL="$(pick_metric \
+    smsp__sass_thread_inst_executed_op_fmul_pred_on \
+    sm__sass_thread_inst_executed_op_fmul_pred_on \
     smsp__sass_thread_inst_executed_op_fmul_pred_on.sum)"
 
 M_FFMA="$(pick_metric \
+    smsp__sass_thread_inst_executed_op_ffma_pred_on \
+    sm__sass_thread_inst_executed_op_ffma_pred_on \
     smsp__sass_thread_inst_executed_op_ffma_pred_on.sum)"
 
 M_REGS="$(pick_metric \

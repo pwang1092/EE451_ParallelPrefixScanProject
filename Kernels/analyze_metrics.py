@@ -266,6 +266,16 @@ def find_first_contains(metric_names, required_tokens):
     return None
 
 
+def find_first_prefix(metric_names, prefixes, exclude_tokens=None):
+    exclude_tokens = exclude_tokens or []
+    for name in sorted(metric_names):
+        if any(name.startswith(prefix) for prefix in prefixes):
+            if any(token in name for token in exclude_tokens):
+                continue
+            return name
+    return None
+
+
 def classify_phase(kernel_name):
     name = (kernel_name or "").lower()
     if "phase1_scan" in name:
@@ -277,10 +287,94 @@ def classify_phase(kernel_name):
     return "other"
 
 
+def block_scan_combine_count(kernel, n):
+    if n <= 0:
+        return 0
+
+    if kernel == "blelloch":
+        return 3 * n - 2
+
+    if kernel == "hillis_steele":
+        total = 0
+        offset = 1
+        while offset < n:
+            total += n - offset
+            offset <<= 1
+        return total
+
+    if kernel == "warp_shuffle":
+        total = 0
+        num_warps = (n + 31) // 32
+
+        for wid in range(num_warps):
+            active = min(32, n - 32 * wid)
+            offset = 1
+            while offset < 32:
+                if active > offset:
+                    total += active - offset
+                offset <<= 1
+
+        offset = 1
+        while offset < 32:
+            if num_warps > offset:
+                total += num_warps - offset
+            offset <<= 1
+
+        if num_warps > 1:
+            total += n - min(32, n)
+
+        return total
+
+    return 0
+
+
+def model_phase_metrics(kernel, d, l):
+    chunk = chunk_size_for_d(d)
+    if l <= 0:
+        return {}
+
+    num_chunks = (l + chunk - 1) // chunk
+    chunk_sizes = [max(0, min(chunk, l - cid * chunk)) for cid in range(num_chunks)]
+
+    phase1_combines = d * sum(block_scan_combine_count(kernel, n) for n in chunk_sizes)
+    phase2_combines = d * block_scan_combine_count(kernel, num_chunks)
+    propagated_elements = d * sum(chunk_sizes[1:])
+    phase3_combines = propagated_elements
+
+    return {
+        "phase1": {
+            "dram_bytes": float(d * (16 * sum(chunk_sizes) + 8 * num_chunks)),
+            "flops": float(3 * phase1_combines),
+        },
+        "phase2": {
+            "dram_bytes": float(16 * d * num_chunks),
+            "flops": float(3 * phase2_combines),
+        },
+        "phase3": {
+            "dram_bytes": float(24 * propagated_elements),
+            "flops": float(3 * phase3_combines),
+        },
+    }
+
+
+def model_run_metrics(kernel, d, l):
+    phases = model_phase_metrics(kernel, d, l)
+    dram_bytes = 0.0
+    flops = 0.0
+    for phase_data in phases.values():
+        dram_bytes += phase_data.get("dram_bytes", 0.0)
+        flops += phase_data.get("flops", 0.0)
+    return {
+        "dram_bytes": dram_bytes,
+        "flops": flops,
+    }
+
+
 def select_metric_names(metric_names):
     duration = find_first_exact(
         metric_names,
         [
+            "gpu__time_duration",
             "gpu__time_duration.sum",
             "gpu__time_duration.avg",
         ],
@@ -292,29 +386,62 @@ def select_metric_names(metric_names):
         "duration": duration,
         "sm_util": find_first_exact(
             metric_names,
-            ["sm__throughput.avg.pct_of_peak_sustained_elapsed"],
+            [
+                "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+                "sm__throughput.avg.pct_of_peak_sustained_active",
+                "sm__throughput",
+            ],
         ) or find_first_contains(metric_names, ["sm__throughput", "pct_of_peak"]),
         "dram_util": find_first_exact(
             metric_names,
-            ["dram__throughput.avg.pct_of_peak_sustained_elapsed"],
-        ) or find_first_contains(metric_names, ["dram__throughput", "pct_of_peak"]),
+            [
+                "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
+                "gpu__dram_throughput.avg.pct_of_peak_sustained_active",
+                "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+                "dram__throughput.avg.pct_of_peak_sustained_active",
+                "gpu__dram_throughput",
+                "dram__throughput",
+            ],
+        ) or find_first_contains(metric_names, ["dram_throughput", "pct_of_peak"]),
         "occ": find_first_exact(
             metric_names,
-            ["sm__warps_active.avg.pct_of_peak_sustained_active"],
+            [
+                "sm__warps_active.avg.pct_of_peak_sustained_active",
+                "sm__warps_active.avg.pct_of_peak_sustained_elapsed",
+                "sm__warps_active",
+            ],
         ) or find_first_contains(metric_names, ["sm__warps_active", "pct_of_peak"]),
         "warp_ratio": find_first_exact(
             metric_names,
-            ["smsp__thread_inst_executed_per_inst_executed.ratio"],
-        ) or find_first_contains(metric_names, ["thread_inst_executed_per_inst_executed", "ratio"]),
-        "dram_bytes": find_first_exact(metric_names, ["dram__bytes.sum"]),
-        "dram_bytes_read": find_first_exact(metric_names, ["dram__bytes_read.sum"]),
-        "dram_bytes_write": find_first_exact(metric_names, ["dram__bytes_write.sum"]),
-        "fadd": find_first_exact(metric_names, ["smsp__sass_thread_inst_executed_op_fadd_pred_on.sum"])
-            or find_first_contains(metric_names, ["op_fadd", "pred_on", "sum"]),
-        "fmul": find_first_exact(metric_names, ["smsp__sass_thread_inst_executed_op_fmul_pred_on.sum"])
-            or find_first_contains(metric_names, ["op_fmul", "pred_on", "sum"]),
-        "ffma": find_first_exact(metric_names, ["smsp__sass_thread_inst_executed_op_ffma_pred_on.sum"])
-            or find_first_contains(metric_names, ["op_ffma", "pred_on", "sum"]),
+            [
+                "smsp__thread_inst_executed_per_inst_executed.ratio",
+                "smsp__thread_inst_executed_per_inst_executed",
+            ],
+        ) or find_first_contains(metric_names, ["thread_inst_executed_per_inst_executed"]),
+        "dram_bytes": find_first_exact(metric_names, ["dram__bytes.sum", "dram__bytes"])
+            or find_first_prefix(metric_names, ["dram__bytes"], exclude_tokens=["read", "write"]),
+        "dram_bytes_read": find_first_exact(metric_names, ["dram__bytes_read.sum", "dram__bytes_read"])
+            or find_first_prefix(metric_names, ["dram__bytes_read"]),
+        "dram_bytes_write": find_first_exact(metric_names, ["dram__bytes_write.sum", "dram__bytes_write"])
+            or find_first_prefix(metric_names, ["dram__bytes_write"]),
+        "fadd": find_first_exact(metric_names, [
+            "smsp__sass_thread_inst_executed_op_fadd_pred_on.sum",
+            "smsp__sass_thread_inst_executed_op_fadd_pred_on",
+            "sm__sass_thread_inst_executed_op_fadd_pred_on.sum",
+            "sm__sass_thread_inst_executed_op_fadd_pred_on",
+        ]) or find_first_contains(metric_names, ["op_fadd", "pred_on"]),
+        "fmul": find_first_exact(metric_names, [
+            "smsp__sass_thread_inst_executed_op_fmul_pred_on.sum",
+            "smsp__sass_thread_inst_executed_op_fmul_pred_on",
+            "sm__sass_thread_inst_executed_op_fmul_pred_on.sum",
+            "sm__sass_thread_inst_executed_op_fmul_pred_on",
+        ]) or find_first_contains(metric_names, ["op_fmul", "pred_on"]),
+        "ffma": find_first_exact(metric_names, [
+            "smsp__sass_thread_inst_executed_op_ffma_pred_on.sum",
+            "smsp__sass_thread_inst_executed_op_ffma_pred_on",
+            "sm__sass_thread_inst_executed_op_ffma_pred_on.sum",
+            "sm__sass_thread_inst_executed_op_ffma_pred_on",
+        ]) or find_first_contains(metric_names, ["op_ffma", "pred_on"]),
         "regs": find_first_exact(metric_names, ["launch__registers_per_thread"])
             or find_first_contains(metric_names, ["launch__registers_per_thread"]),
         "shmem": find_first_exact(metric_names, ["launch__shared_mem_per_block_allocated"])
@@ -459,6 +586,7 @@ def launch_to_metrics_rows(launches, kernel, d, l):
         metric_names.update(k for k in launch.keys() if not k.startswith("__"))
 
     selected = select_metric_names(metric_names)
+    phase_models = model_phase_metrics(kernel, d, l)
 
     rows = []
     for launch in launches:
@@ -500,20 +628,37 @@ def launch_to_metrics_rows(launches, kernel, d, l):
             l2_hit_rate = 100.0 * l2_hit / (l2_hit + l2_miss)
 
         kernel_name = launch.get("__kernel_name__", "unknown")
+        phase = classify_phase(kernel_name)
+        phase_model = phase_models.get(phase, {})
+
+        dram_bytes_source = "ncu" if dram_bytes is not None else None
+        if dram_bytes is None and phase_model:
+            dram_bytes = phase_model.get("dram_bytes")
+            if dram_bytes is not None:
+                dram_bytes_source = "model"
+
+        flops_source = "ncu" if flops is not None else None
+        if flops is None and phase_model:
+            flops = phase_model.get("flops")
+            if flops is not None:
+                flops_source = "model"
+
         rows.append({
             "kernel": kernel,
             "D": d,
             "L": l,
             "launch_id": launch.get("__launch_id__", "unknown"),
             "launch_kernel_name": kernel_name,
-            "phase": classify_phase(kernel_name),
+            "phase": phase,
             "gpu_time_duration": gpu_time,
             "sm_util_pct": sm_util,
             "dram_util_pct": dram_util,
             "achieved_occupancy_pct": occ,
             "warp_threads_per_inst": warp_ratio,
             "dram_bytes": dram_bytes,
+            "dram_bytes_source": dram_bytes_source,
             "flops": flops,
+            "flops_source": flops_source,
             "registers_per_thread": val(selected["regs"]),
             "shared_mem_per_block_bytes": val(selected["shmem"]),
             "block_size": val(selected["block_size"]),
@@ -595,6 +740,7 @@ def main():
         kernel, d, l = key
         time_rec = timing.get(key, {})
         ncu_rec = ncu_data.get(key, {})
+        model_rec = model_run_metrics(kernel, d, l)
 
         row = {
             "kernel": kernel,
@@ -612,10 +758,22 @@ def main():
             "shared_mem_per_block_peak_bytes": ncu_rec.get("shared_mem_per_block_peak_bytes"),
             "block_size_peak": ncu_rec.get("block_size_peak"),
             "dram_bytes": ncu_rec.get("dram_bytes"),
+            "dram_bytes_source": "ncu" if ncu_rec.get("dram_bytes") is not None else None,
             "flops": ncu_rec.get("flops"),
+            "flops_source": "ncu" if ncu_rec.get("flops") is not None else None,
             "l1_hit_rate_pct": ncu_rec.get("l1_hit_rate_pct"),
             "l2_hit_rate_pct": ncu_rec.get("l2_hit_rate_pct"),
         }
+
+        if row["dram_bytes"] is None:
+            row["dram_bytes"] = model_rec.get("dram_bytes")
+            if row["dram_bytes"] is not None:
+                row["dram_bytes_source"] = "model"
+
+        if row["flops"] is None:
+            row["flops"] = model_rec.get("flops")
+            if row["flops"] is not None:
+                row["flops_source"] = "model"
 
         row["resident_warps_est"] = None
         if row["achieved_occupancy_pct"] is not None:
@@ -681,6 +839,7 @@ def main():
             "kernel", "D", "L", "launch_id", "launch_kernel_name", "phase",
             "gpu_time_duration", "sm_util_pct", "dram_util_pct",
             "achieved_occupancy_pct", "warp_threads_per_inst", "dram_bytes", "flops",
+            "dram_bytes_source", "flops_source",
             "registers_per_thread", "shared_mem_per_block_bytes", "block_size",
             "l1_hit_rate_pct", "l2_hit_rate_pct",
         ],
@@ -758,7 +917,8 @@ def main():
         "kernel", "D", "L", "chunk_size", "time_ms", "correct", "throughput_GB_s_timing",
         "sm_util_pct", "dram_util_pct", "achieved_occupancy_pct", "resident_warps_est",
         "warp_efficiency_pct", "registers_per_thread_peak", "shared_mem_per_block_peak_bytes",
-        "block_size_peak", "dram_bytes", "flops", "ai_flop_per_byte", "gflops", "dram_bw_gb_s",
+        "block_size_peak", "dram_bytes", "dram_bytes_source", "flops", "flops_source",
+        "ai_flop_per_byte", "gflops", "dram_bw_gb_s",
         "bandwidth_util_pct", "l1_hit_rate_pct", "l2_hit_rate_pct", "roofline_bound",
         "roofline_limit_gflops", "roofline_efficiency_pct", "utilization_bound",
     ]
